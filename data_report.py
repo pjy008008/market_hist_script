@@ -7,7 +7,8 @@ from datetime import datetime
 
 # 기존 수집 데이터 경로와 맞춤
 DATA_DIR = "./market_data"
-REPORT_FILE = "data_audit_report.txt"
+REPORT_DIR = "./report"
+REPORT_FILE = os.path.join(REPORT_DIR, "data_audit_report.txt")
 
 def analyze_parquet(file_path):
     """개별 Parquet 파일의 데이터 정합성과 품질을 정밀 분석합니다."""
@@ -129,6 +130,7 @@ def main():
     lines.append("=" * 100)
     
     # 파일 쓰기
+    os.makedirs(REPORT_DIR, exist_ok=True)
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
         

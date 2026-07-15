@@ -8,6 +8,9 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
 # [설정 영역] 본인의 API 키 지정
@@ -15,6 +18,8 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 DATA_DIR = "./market_data"          # 로컬 저장용 폴더 경로
+TICKER_INFO_DIR = "./ticker_info"   # 티커 목록 저장용 폴더 경로
+TICKER_FILE = os.path.join(TICKER_INFO_DIR, "sp500_tickers_3years.txt")
 
 # 폴더가 없을 경우 생성
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -161,8 +166,9 @@ def main():
     tickers = get_sp500_tickers()
     print(f"총 {len(tickers)}개의 종목을 수집/업데이트할 예정입니다.\n")
     
-    # 확인용으로 티커 명단을 텍스트 파일로 남겨둠
-    with open("sp500_tickers_3years.txt", "w") as f:
+    # 확인용으로 티커 명단을 ticker_info 폴더에 남겨둠
+    os.makedirs(TICKER_INFO_DIR, exist_ok=True)
+    with open(TICKER_FILE, "w", encoding="utf-8") as f:
         for ticker in tickers:
             f.write(f"{ticker}\n")
     
