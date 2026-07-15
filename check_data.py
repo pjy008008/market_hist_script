@@ -1,12 +1,12 @@
-
+# 데이터 체크용 스크립트(데이터 추출 후 잘 불러왔는지 확인용)
 
 import os
 import glob
 import pandas as pd
 from datetime import datetime
 
-# 데이터가 저장된 폴더 경로 (기존 script.py의 DATA_DIR과 맞춤)
-DATA_DIR = "./market_data"
+# script.py에서 Parquet을 선택했을 때 저장되는 폴더 경로
+DATA_DIR = "./market_data/parquet"
 
 def check_single_parquet(file_path):
     """개별 Parquet 파일의 메타데이터 및 품질을 분석합니다."""

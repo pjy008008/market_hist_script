@@ -17,12 +17,9 @@ load_dotenv()
 # ==========================================
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-DATA_DIR = "./market_data"          # 로컬 저장용 폴더 경로
+DATA_DIR = "./market_data"          # 로컬 저장용 상위 폴더 경로
 TICKER_INFO_DIR = "./ticker_info"   # 티커 목록 저장용 폴더 경로
 TICKER_FILE = os.path.join(TICKER_INFO_DIR, "sp500_tickers_3years.txt")
-
-# 폴더가 없을 경우 생성
-os.makedirs(DATA_DIR, exist_ok=True)
 
 # Alpaca 클라이언트 초기화
 if API_KEY == "YOUR_ALPACA_API_KEY" or SECRET_KEY == "YOUR_ALPACA_SECRET_KEY":
@@ -30,6 +27,58 @@ if API_KEY == "YOUR_ALPACA_API_KEY" or SECRET_KEY == "YOUR_ALPACA_SECRET_KEY":
     sys.exit(1)
 
 client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+
+
+def choose_storage_format():
+    """실행할 때 데이터를 저장할 파일 형식을 선택합니다."""
+    choices = {
+        "": "csv",
+        "1": "csv",
+        "csv": "csv",
+        ".csv": "csv",
+        "2": "parquet",
+        "parquet": "parquet",
+        ".parquet": "parquet",
+    }
+
+    print("저장 형식을 선택해 주세요.")
+    print("  1. CSV (기본값)")
+    print("  2. Parquet")
+
+    while True:
+        try:
+            choice = input("선택 [1/2]: ").strip().lower()
+        except EOFError:
+            choice = ""
+
+        if choice in choices:
+            return choices[choice]
+
+        print("잘못된 입력입니다. 1(CSV) 또는 2(Parquet)를 입력해 주세요.")
+
+
+def load_local_data(file_path, storage_format):
+    """선택한 저장 형식의 로컬 데이터를 읽고 공통 MultiIndex 구조로 반환합니다."""
+    if storage_format == "parquet":
+        return pd.read_parquet(file_path)
+
+    df = pd.read_csv(file_path)
+    required_index_columns = {"symbol", "timestamp"}
+    missing_columns = required_index_columns.difference(df.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(f"CSV 인덱스 컬럼이 없습니다: {missing}")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    return df.set_index(["symbol", "timestamp"])
+
+
+def save_local_data(df, file_path, storage_format):
+    """데이터를 선택한 형식으로 저장합니다."""
+    if storage_format == "parquet":
+        df.to_parquet(file_path)
+    else:
+        df.to_csv(file_path, index=True)
 
 def get_sp500_tickers():
     """위키피디아에서 최근 3년간 존재했던 S&P 500 히스토리컬 티커 목록을 가져옵니다."""
@@ -105,14 +154,18 @@ def fetch_data_from_alpaca(symbol, start_dt, end_dt):
         print(f"[{symbol}] 데이터 수집 중 오류 발생: {e}")
         return pd.DataFrame()
 
-def process_symbol(symbol, now):
+def process_symbol(symbol, now, storage_format, storage_dir):
     """개별 종목에 대해 초기화 또는 증분 업데이트를 수행합니다."""
-    file_path = f"{DATA_DIR}/{symbol}_5min_historical.parquet"
+    file_symbol = symbol.replace("/", "-")
+    file_path = os.path.join(
+        storage_dir,
+        f"{file_symbol}_5min_historical.{storage_format}",
+    )
     
     # 1. 기존 로컬 데이터 파일 존재 여부 확인
     if os.path.exists(file_path):
         try:
-            df_local = pd.read_parquet(file_path)
+            df_local = load_local_data(file_path, storage_format)
             df_local = df_local.sort_index()
             
             # 마지막 저장 데이터 시각 추출
@@ -136,7 +189,7 @@ def process_symbol(symbol, now):
             if not df_new.empty:
                 df_combined = pd.concat([df_local, df_new])
                 df_combined = df_combined[~df_combined.index.duplicated(keep='last')].sort_index()
-                df_combined.to_parquet(file_path)
+                save_local_data(df_combined, file_path, storage_format)
                 print(f"[{symbol}] 업데이트 완료! (+{len(df_new)}행, 총 {len(df_combined)}행)")
             else:
                 print(f"[{symbol}] 추가할 최신 데이터가 없습니다.")
@@ -154,12 +207,19 @@ def process_symbol(symbol, now):
         
         if not df_initial.empty:
             df_initial = df_initial.sort_index()
-            df_initial.to_parquet(file_path)
+            save_local_data(df_initial, file_path, storage_format)
             print(f"[{symbol}] 최초 3년치 5분봉 저장 성공! (총 {len(df_initial)}행)")
         else:
             print(f"[{symbol}] 최초 수집 실패 또는 데이터가 존재하지 않습니다.")
 
 def main():
+    storage_format = choose_storage_format()
+    storage_dir = os.path.join(DATA_DIR, storage_format)
+    os.makedirs(storage_dir, exist_ok=True)
+
+    print(f"선택한 저장 형식: {storage_format.upper()}")
+    print(f"저장 폴더: {storage_dir}\n")
+
     now = datetime.now(timezone.utc)
     
     print("위키피디아에서 S&P 500 히스토리컬 티커 목록 수집 중...")
@@ -175,7 +235,7 @@ def main():
     # 전 종목 루프 돌며 데이터 다운로드 진행
     for idx, symbol in enumerate(tickers, 1):
         print(f"[{idx}/{len(tickers)}] {symbol} 처리 시작")
-        process_symbol(symbol, now)
+        process_symbol(symbol, now, storage_format, storage_dir)
         
         # API 과부하 및 차단 방지를 위한 미세 딜레이
         time.sleep(0.5)
