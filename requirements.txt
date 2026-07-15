@@ -1,0 +1,24 @@
+alpaca-py==0.43.5
+annotated-types==0.7.0
+certifi==2026.6.17
+charset-normalizer==3.4.9
+idna==3.18
+lxml==6.1.1
+msgpack==1.2.1
+numpy @ file:///D:/bld/numpy_1747544591878/work/dist/numpy-2.2.6-cp310-cp310-win_amd64.whl#sha256=af66576ce916c795ffa81be9620c8138a3fda6e1713b2bf7775a630e47eca3a8
+packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1777103621/work
+pandas @ file:///D:/bld/pandas_1764614482805/work
+pyarrow @ file:///D:/bld/apache-arrow_1776927656689/work/python
+pydantic==2.13.4
+pydantic_core==2.46.4
+python-dateutil @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_python-dateutil_1751104122/work
+python-dotenv==1.2.2
+pytz @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_pytz_1777892201/work
+requests==2.34.2
+six @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_six_1753199211/work
+sseclient-py==1.9.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+tzdata @ file:///home/conda/feedstock_root/build_artifacts/python-tzdata_1783704735836/work
+urllib3==2.7.0
+websockets==16.1
