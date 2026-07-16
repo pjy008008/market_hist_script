@@ -1,5 +1,3 @@
-# Alphaca 사용해서 데이터 불러오는 스크립트
-
 import os
 import sys
 import time
@@ -8,6 +6,7 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.enums import Adjustment  # 🛠️ 수정주가 옵션을 위한 임포트 추가
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,12 +16,11 @@ load_dotenv()
 # ==========================================
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-DATA_DIR = "./market_data"          # 로컬 저장용 상위 폴더 경로
 TICKER_INFO_DIR = "./ticker_info"   # 티커 목록 저장용 폴더 경로
 TICKER_FILE = os.path.join(TICKER_INFO_DIR, "sp500_tickers_3years.txt")
 
 # Alpaca 클라이언트 초기화
-if API_KEY == "YOUR_ALPACA_API_KEY" or SECRET_KEY == "YOUR_ALPACA_SECRET_KEY":
+if not API_KEY or not SECRET_KEY or API_KEY == "YOUR_ALPACA_API_KEY" or SECRET_KEY == "YOUR_ALPACA_SECRET_KEY":
     print("[Error] Alpaca API 키와 Secret 키를 먼저 입력해 주세요.")
     sys.exit(1)
 
@@ -30,7 +28,7 @@ client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
 
 def choose_storage_format():
-    """실행할 때 데이터를 저장할 파일 형식을 선택합니다."""
+    """1번째 선택: 데이터를 저장할 파일 형식을 선택합니다."""
     choices = {
         "": "csv",
         "1": "csv",
@@ -41,9 +39,11 @@ def choose_storage_format():
         ".parquet": "parquet",
     }
 
-    print("저장 형식을 선택해 주세요.")
+    print("==========================================")
+    print(" [선택 1] 저장 형식을 선택해 주세요.")
     print("  1. CSV (기본값)")
     print("  2. Parquet")
+    print("==========================================")
 
     while True:
         try:
@@ -55,6 +55,34 @@ def choose_storage_format():
             return choices[choice]
 
         print("잘못된 입력입니다. 1(CSV) 또는 2(Parquet)를 입력해 주세요.")
+
+
+def choose_adjustment_option():
+    """2번째 선택: 수정 주가(Adjustment) 반영 여부를 선택합니다."""
+    choices = {
+        "": False,
+        "1": False,
+        "raw": False,
+        "2": True,
+        "adjusted": True,
+    }
+
+    print("\n==========================================")
+    print(" [선택 2] 주가 데이터 타입을 선택해 주세요.")
+    print("  1. Raw 데이터 (배당/분할 미보정 - 기본값)")
+    print("  2. Adjusted 데이터 (배당/분할 수정주가 반영)")
+    print("==========================================")
+
+    while True:
+        try:
+            choice = input("선택 [1/2]: ").strip().lower()
+        except EOFError:
+            choice = ""
+
+        if choice in choices:
+            return choices[choice]
+
+        print("잘못된 입력입니다. 1(Raw) 또는 2(Adjusted)를 입력해 주세요.")
 
 
 def load_local_data(file_path, storage_format):
@@ -79,6 +107,7 @@ def save_local_data(df, file_path, storage_format):
         df.to_parquet(file_path)
     else:
         df.to_csv(file_path, index=True)
+
 
 def get_sp500_tickers():
     """위키피디아에서 최근 3년간 존재했던 S&P 500 히스토리컬 티커 목록을 가져옵니다."""
@@ -110,7 +139,7 @@ def get_sp500_tickers():
         df_changes['Date'] = pd.to_datetime(df_changes['Date'], errors='coerce')
         df_changes = df_changes.dropna(subset=['Date'])
         
-        # 🛠️ 타임존 에러 완벽 해결: pd.Timestamp를 사용하고 tz 정보를 완전히 제거(tz=None)
+        # 타임존 에러 완벽 해결: pd.Timestamp를 사용하고 tz 정보를 완전히 제거(tz=None)
         three_years_ago = pd.Timestamp(datetime.now()).replace(tzinfo=None) - pd.Timedelta(days=3 * 365)
         
         # 데이터프레임의 Date 컬럼도 타임존이 없는 상태로 일치시킨 뒤 비교
@@ -137,13 +166,18 @@ def get_sp500_tickers():
         print(f"티커 목록 크롤링 실패, 기본 셋으로 대체합니다: {e}")
         return ["AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA"]
 
-def fetch_data_from_alpaca(symbol, start_dt, end_dt):
-    """Alpaca API에서 특정 기간의 5분봉 데이터를 요청합니다."""
+
+def fetch_data_from_alpaca(symbol, start_dt, end_dt, use_adjusted):
+    """Alpaca API에서 특정 기간의 5분봉 데이터를 요청합니다 (선택한 수정주가 옵션 적용)."""
+    # 선택에 따른 adjustment 옵션 결정
+    adj_option = Adjustment.ALL if use_adjusted else Adjustment.RAW
+
     request_params = StockBarsRequest(
         symbol_or_symbols=[symbol],
         timeframe=TimeFrame(5, TimeFrameUnit.Minute),
         start=start_dt,
         end=end_dt,
+        adjustment=adj_option  # 🛠️ 동적으로 선택된 옵션 대입
     )
     try:
         bars = client.get_stock_bars(request_params)
@@ -154,7 +188,8 @@ def fetch_data_from_alpaca(symbol, start_dt, end_dt):
         print(f"[{symbol}] 데이터 수집 중 오류 발생: {e}")
         return pd.DataFrame()
 
-def process_symbol(symbol, now, storage_format, storage_dir):
+
+def process_symbol(symbol, now, storage_format, storage_dir, use_adjusted):
     """개별 종목에 대해 초기화 또는 증분 업데이트를 수행합니다."""
     file_symbol = symbol.replace("/", "-")
     file_path = os.path.join(
@@ -184,7 +219,7 @@ def process_symbol(symbol, now, storage_format, storage_dir):
                 return
 
             print(f"[{symbol}] 업데이트 진행 중... ({start_time} ~ {end_time})")
-            df_new = fetch_data_from_alpaca(symbol, start_time, end_time)
+            df_new = fetch_data_from_alpaca(symbol, start_time, end_time, use_adjusted)
             
             if not df_new.empty:
                 df_combined = pd.concat([df_local, df_new])
@@ -203,7 +238,7 @@ def process_symbol(symbol, now, storage_format, storage_dir):
         start_time = now - timedelta(days=3*365)
         end_time = now - timedelta(minutes=30)
         
-        df_initial = fetch_data_from_alpaca(symbol, start_time, end_time)
+        df_initial = fetch_data_from_alpaca(symbol, start_time, end_time, use_adjusted)
         
         if not df_initial.empty:
             df_initial = df_initial.sort_index()
@@ -212,13 +247,24 @@ def process_symbol(symbol, now, storage_format, storage_dir):
         else:
             print(f"[{symbol}] 최초 수집 실패 또는 데이터가 존재하지 않습니다.")
 
+
 def main():
+    # 1. 저장 포맷 선택 (CSV / Parquet)
     storage_format = choose_storage_format()
-    storage_dir = os.path.join(DATA_DIR, storage_format)
+    
+    # 2. 수정주가 반영 여부 선택 (Raw / Adjusted)
+    use_adjusted = choose_adjustment_option()
+
+    # 3. 선택 조합에 따라 상위 및 하위 저장 폴더 구조 결정
+    parent_dir = "./adjust_market_data" if use_adjusted else "./market_data"
+    storage_dir = os.path.join(parent_dir, storage_format)
     os.makedirs(storage_dir, exist_ok=True)
 
-    print(f"선택한 저장 형식: {storage_format.upper()}")
-    print(f"저장 폴더: {storage_dir}\n")
+    print("\n" + "=" * 50)
+    print(f"• 데이터 타입  : {'ADJUSTED (수정주가 반영)' if use_adjusted else 'RAW (미보정)'}")
+    print(f"• 파일 형식    : {storage_format.upper()}")
+    print(f"• 저장 폴더 경로: {storage_dir}")
+    print("=" * 50 + "\n")
 
     now = datetime.now(timezone.utc)
     
@@ -235,11 +281,12 @@ def main():
     # 전 종목 루프 돌며 데이터 다운로드 진행
     for idx, symbol in enumerate(tickers, 1):
         print(f"[{idx}/{len(tickers)}] {symbol} 처리 시작")
-        process_symbol(symbol, now, storage_format, storage_dir)
+        process_symbol(symbol, now, storage_format, storage_dir, use_adjusted)
         
         # API 과부하 및 차단 방지를 위한 미세 딜레이
         time.sleep(0.5)
         print("-" * 50)
+
 
 if __name__ == "__main__":
     main()
