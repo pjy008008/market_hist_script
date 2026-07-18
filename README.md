@@ -55,6 +55,7 @@ Wikipedia S&P 500 목록/변경 이력
 | --- | --- |
 | `script.py` | 전체 티커 수집, Raw/수정주가 5분봉 최초 수집 및 증분 갱신 |
 | `filter_regular_session.py` | XNYS 공식 일정으로 정규장 봉만 필터링해 별도 폴더에 저장 |
+| `audit_regular_session.py` | 정규장 결과의 종목별 시작·종료일, 커버리지와 연속 누락 구간을 CSV로 보고 |
 | `get_ticker.py` | Alpaca 호출 없이 최근 3년의 S&P 500 티커 목록만 확인 |
 | `check_data.py` | `market_data/parquet/`의 로컬 Parquet 전체 검사 후 요약과 앞 20개 종목을 터미널에 출력 |
 | `data_report.py` | 전 종목 검사 결과와 백테스트 가이드를 `report/data_audit_report.txt`로 생성 |
@@ -234,7 +235,46 @@ python filter_regular_session.py --help
 
 `pandas-market-calendars`의 일정 규칙은 설치된 패키지에 포함되어 있으며 실행할 때 서버에서 갱신하지 않습니다. 새로 발표되거나 정정된 특별 거래 일정을 반영하려면 의존성을 최신 버전으로 갱신한 뒤 다시 필터링하세요.
 
-### 7. 수집 결과 검증하기
+### 7. 정규장 데이터 기간과 누락 구간 검사하기
+
+`filter_regular_session.py`로 생성한 데이터에서 종목별 시작·종료일과 빠진 5분봉을 검사합니다.
+
+```bash
+python audit_regular_session.py
+```
+
+필터 스크립트와 마찬가지로 데이터 타입(Raw/Adjusted)과 형식(CSV/Parquet)을 차례로 선택합니다. 자동 실행 시에는 옵션을 지정할 수 있습니다.
+
+```bash
+python audit_regular_session.py --data-type adjusted --format parquet
+```
+
+검사 결과는 기본적으로 `report/regular_session_audit/`에 저장됩니다. 예를 들어 Adjusted Parquet을 선택하면 다음 두 파일이 생성됩니다.
+
+```text
+report/regular_session_audit/adjusted_parquet_summary.csv
+report/regular_session_audit/adjusted_parquet_missing_intervals.csv
+```
+
+`*_summary.csv`의 주요 열은 다음과 같습니다.
+
+| 열 | 설명 |
+| --- | --- |
+| `first_timestamp_utc`, `last_timestamp_utc` | 실제 관측된 첫 봉과 마지막 봉의 UTC 시각 |
+| `first_session_date`, `last_session_date` | XNYS 현지 기준 첫 거래일과 마지막 거래일 |
+| `observed_rows`, `unique_timestamps` | 전체 행 수와 중복을 제거한 타임스탬프 수 |
+| `expected_bars` | 관측 시작과 종료 사이에 XNYS 일정상 기대되는 5분봉 수 |
+| `missing_bars` | 기대 타임스탬프 중 실제 데이터에 없는 봉 수 |
+| `coverage_pct` | `관측된 기대 봉 / 전체 기대 봉 × 100` |
+| `missing_intervals` | 같은 거래일 안에서 연속된 누락 구간 수 |
+| `duplicate_timestamps` | 중복 타임스탬프 수 |
+| `unexpected_timestamps` | XNYS 5분 간격에 포함되지 않는 타임스탬프 수 |
+
+`*_missing_intervals.csv`에는 누락 시작·종료 시각, 누락 봉 수와 분량, 누락 직전·직후 봉이 기록됩니다. 서로 다른 거래일의 누락은 하나의 구간으로 합치지 않습니다.
+
+기대 구간은 각 종목에서 실제로 관측된 첫 봉부터 마지막 봉까지만 계산합니다. 따라서 신규 상장이나 상장폐지 전후 기간을 누락으로 만들지 않으며, 종목 간 전체 데이터 기간 차이는 `first_session_date`와 `last_session_date`로 비교해야 합니다. 이 스크립트는 누락 봉을 채우거나 원본 파일을 변경하지 않습니다.
+
+### 8. 기존 수집 결과 검증하기
 
 터미널에서 전체 요약과 앞 20개 종목을 확인합니다.
 
