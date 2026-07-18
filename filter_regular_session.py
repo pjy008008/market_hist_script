@@ -170,6 +170,63 @@ def process_source(source: DataSource, calendar_name: str) -> tuple[int, int, in
     return processed_files, total_rows, kept_rows
 
 
+def choose_data_type() -> str:
+    """Prompt for the source price type when no CLI option was supplied."""
+    choices = {
+        "": "raw",
+        "1": "raw",
+        "raw": "raw",
+        "2": "adjusted",
+        "adjusted": "adjusted",
+        "adjust": "adjusted",
+    }
+
+    print("=" * 50)
+    print(" [선택 1] 처리할 데이터 타입을 선택해 주세요.")
+    print("  1. Raw 데이터 (기본값)")
+    print("  2. Adjusted 데이터 (배당/분할 수정주가 반영)")
+    print("=" * 50)
+
+    while True:
+        try:
+            choice = input("선택 [1/2]: ").strip().lower()
+        except EOFError:
+            choice = ""
+
+        if choice in choices:
+            return choices[choice]
+        print("잘못된 입력입니다. 1(Raw) 또는 2(Adjusted)를 입력해 주세요.")
+
+
+def choose_storage_format() -> str:
+    """Prompt for the file format when no CLI option was supplied."""
+    choices = {
+        "": "csv",
+        "1": "csv",
+        "csv": "csv",
+        ".csv": "csv",
+        "2": "parquet",
+        "parquet": "parquet",
+        ".parquet": "parquet",
+    }
+
+    print("\n" + "=" * 50)
+    print(" [선택 2] 처리할 파일 형식을 선택해 주세요.")
+    print("  1. CSV (기본값)")
+    print("  2. Parquet")
+    print("=" * 50)
+
+    while True:
+        try:
+            choice = input("선택 [1/2]: ").strip().lower()
+        except EOFError:
+            choice = ""
+
+        if choice in choices:
+            return choices[choice]
+        print("잘못된 입력입니다. 1(CSV) 또는 2(Parquet)를 입력해 주세요.")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     project_root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
@@ -180,15 +237,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--data-type",
         choices=("raw", "adjusted", "all"),
-        default="all",
-        help="처리할 데이터 타입 (기본값: all)",
+        help="처리할 데이터 타입 (미지정 시 실행 중 선택)",
     )
     parser.add_argument(
         "--format",
         dest="storage_format",
         choices=("csv", "parquet", "all"),
-        default="all",
-        help="처리할 파일 형식 (기본값: all)",
+        help="처리할 파일 형식 (미지정 시 실행 중 선택)",
     )
     parser.add_argument(
         "--calendar",
@@ -208,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project_root = Path(__file__).resolve().parent
     output_root = args.output_dir.expanduser().resolve()
+    data_type = args.data_type or choose_data_type()
+    storage_format = args.storage_format or choose_storage_format()
 
     try:
         mcal.get_calendar(args.calendar)
@@ -216,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"캘린더: {args.calendar}")
+    print(f"데이터 타입: {data_type}")
+    print(f"파일 형식: {storage_format}")
     print(f"결과 폴더: {output_root}")
 
     totals = [0, 0, 0]
@@ -223,8 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         sources = build_sources(
             project_root,
             output_root,
-            args.data_type,
-            args.storage_format,
+            data_type,
+            storage_format,
         )
         for source in sources:
             source_totals = process_source(source, args.calendar)

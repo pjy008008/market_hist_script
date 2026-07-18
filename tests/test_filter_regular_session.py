@@ -1,8 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
-from filter_regular_session import filter_regular_session
+from filter_regular_session import (
+    choose_data_type,
+    choose_storage_format,
+    filter_regular_session,
+    parse_args,
+)
 
 
 class FilterRegularSessionTests(unittest.TestCase):
@@ -55,6 +61,21 @@ class FilterRegularSessionTests(unittest.TestCase):
             self.kept_timestamps(timestamps),
             [pd.Timestamp(timestamps[1])],
         )
+
+
+class InteractiveSelectionTests(unittest.TestCase):
+    @patch("builtins.input", return_value="2")
+    def test_data_type_second_choice_selects_adjusted(self, _mock_input):
+        self.assertEqual(choose_data_type(), "adjusted")
+
+    @patch("builtins.input", side_effect=["invalid", "2"])
+    def test_format_reprompts_and_selects_parquet(self, _mock_input):
+        self.assertEqual(choose_storage_format(), "parquet")
+
+    def test_omitted_cli_selections_remain_unset_for_interactive_prompt(self):
+        args = parse_args([])
+        self.assertIsNone(args.data_type)
+        self.assertIsNone(args.storage_format)
 
 
 if __name__ == "__main__":
