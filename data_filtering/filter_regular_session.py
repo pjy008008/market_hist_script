@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import pandas_market_calendars as mcal
+from pandas.api.types import is_datetime64_any_dtype
 
 
 DEFAULT_CALENDAR = "XNYS"
@@ -24,6 +26,62 @@ class DataSource:
     destination_dir: Path
 
 
+def parse_timestamp_values(values: Iterable[object]) -> pd.DatetimeIndex:
+    """Parse ISO timestamps or numeric Unix epochs into UTC timestamps.
+
+    Numeric timestamps are accepted in seconds, milliseconds, microseconds, or
+    nanoseconds. Alpaca JSON representations commonly expose timestamps as Unix
+    milliseconds even when the original Parquet column has a datetime type.
+    """
+    value_series = pd.Series(values, copy=False)
+    if is_datetime64_any_dtype(value_series.dtype):
+        return pd.DatetimeIndex(
+            pd.to_datetime(value_series, errors="raise", utc=True)
+        )
+
+    non_null = value_series.dropna()
+    numeric = pd.to_numeric(value_series, errors="coerce")
+    if not non_null.empty and numeric.loc[non_null.index].notna().all():
+        magnitude = float(numeric.loc[non_null.index].abs().median())
+        if magnitude < 1e11:
+            unit = "s"
+        elif magnitude < 1e14:
+            unit = "ms"
+        elif magnitude < 1e17:
+            unit = "us"
+        else:
+            unit = "ns"
+        return pd.DatetimeIndex(
+            pd.to_datetime(numeric, unit=unit, errors="raise", utc=True)
+        )
+
+    return pd.DatetimeIndex(pd.to_datetime(value_series, errors="raise", utc=True))
+
+
+def normalize_timestamp_index(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy whose timestamp index level is normalized to UTC."""
+    if "timestamp" not in dataframe.index.names:
+        raise ValueError("인덱스에 timestamp 레벨이 없습니다.")
+
+    normalized = dataframe.copy()
+    timestamps = parse_timestamp_values(
+        normalized.index.get_level_values("timestamp")
+    )
+    if isinstance(normalized.index, pd.MultiIndex):
+        arrays = [
+            timestamps if name == "timestamp" else normalized.index.get_level_values(i)
+            for i, name in enumerate(normalized.index.names)
+        ]
+        normalized.index = pd.MultiIndex.from_arrays(
+            arrays,
+            names=normalized.index.names,
+        )
+    else:
+        normalized.index = timestamps
+        normalized.index.name = "timestamp"
+    return normalized
+
+
 def load_market_data(file_path: Path, storage_format: str) -> pd.DataFrame:
     """Load a collected file while restoring the common MultiIndex for CSV."""
     if storage_format == "parquet":
@@ -36,15 +94,9 @@ def load_market_data(file_path: Path, storage_format: str) -> pd.DataFrame:
             missing = ", ".join(sorted(missing_columns))
             raise ValueError(f"필수 CSV 컬럼이 없습니다: {missing}")
 
-        dataframe["timestamp"] = pd.to_datetime(
-            dataframe["timestamp"], errors="raise", utc=True
-        )
         dataframe = dataframe.set_index(["symbol", "timestamp"])
 
-    if "timestamp" not in dataframe.index.names:
-        raise ValueError("인덱스에 timestamp 레벨이 없습니다.")
-
-    return dataframe
+    return normalize_timestamp_index(dataframe)
 
 
 def filter_regular_session(
@@ -58,16 +110,11 @@ def filter_regular_session(
     A bar at the exact close timestamp is excluded because its interval starts
     after the regular session has ended.
     """
-    if dataframe.empty:
-        return dataframe.copy()
+    normalized = normalize_timestamp_index(dataframe)
+    if normalized.empty:
+        return normalized
 
-    timestamps = pd.DatetimeIndex(
-        pd.to_datetime(
-            dataframe.index.get_level_values("timestamp"),
-            errors="raise",
-            utc=True,
-        )
-    )
+    timestamps = pd.DatetimeIndex(normalized.index.get_level_values("timestamp"))
     calendar = mcal.get_calendar(calendar_name)
 
     local_dates = (
@@ -92,7 +139,7 @@ def filter_regular_session(
         & bar_times.ge(market_opens)
         & bar_times.lt(market_closes)
     )
-    return dataframe.loc[regular_mask.to_numpy()].copy()
+    return normalized.loc[regular_mask.to_numpy()].copy()
 
 
 def save_market_data(

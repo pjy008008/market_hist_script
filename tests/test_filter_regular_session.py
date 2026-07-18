@@ -11,6 +11,8 @@ from data_filtering.filter_regular_session import (
     choose_data_type,
     choose_storage_format,
     filter_regular_session,
+    load_market_data,
+    parse_timestamp_values,
     process_source,
     parse_args,
 )
@@ -76,6 +78,55 @@ class FilterRegularSessionTests(unittest.TestCase):
             self.kept_timestamps(timestamps),
             [pd.Timestamp(timestamps[0])],
         )
+
+    def test_sample_sip_epoch_milliseconds_are_parsed_and_filtered(self):
+        timestamps = [
+            1689773340000,  # 2023-07-19 09:29 America/New_York
+            1689773400000,  # 2023-07-19 09:30 America/New_York
+            1689773460000,  # 2023-07-19 09:31 America/New_York
+        ]
+        index = pd.MultiIndex.from_arrays(
+            [["AAP"] * len(timestamps), timestamps],
+            names=["symbol", "timestamp"],
+        )
+        frame = pd.DataFrame({"close": [65.89, 66.09, 66.40]}, index=index)
+
+        filtered = filter_regular_session(frame)
+
+        self.assertEqual(
+            list(filtered.index.get_level_values("timestamp")),
+            list(pd.to_datetime(timestamps[1:], unit="ms", utc=True)),
+        )
+
+    def test_numeric_unix_timestamp_units_are_auto_detected(self):
+        expected = pd.Timestamp("2023-07-18 16:21:00+00:00")
+        values_by_unit = {
+            "seconds": [1689697260],
+            "milliseconds": [1689697260000],
+            "microseconds": [1689697260000000],
+            "nanoseconds": [1689697260000000000],
+        }
+        for label, values in values_by_unit.items():
+            with self.subTest(unit=label):
+                self.assertEqual(parse_timestamp_values(values)[0], expected)
+
+    def test_csv_epoch_milliseconds_are_normalized_on_load(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_path = Path(temporary_directory) / "AAP.csv"
+            pd.DataFrame(
+                {
+                    "symbol": ["AAP"],
+                    "timestamp": [1689697260000],
+                    "close": [65.30],
+                }
+            ).to_csv(input_path, index=False)
+
+            result = load_market_data(input_path, "csv")
+
+            self.assertEqual(
+                result.index.get_level_values("timestamp")[0],
+                pd.Timestamp("2023-07-18 16:21:00+00:00"),
+            )
 
 
 class InteractiveSelectionTests(unittest.TestCase):
