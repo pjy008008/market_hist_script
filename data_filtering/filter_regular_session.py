@@ -17,6 +17,7 @@ DEFAULT_CALENDAR = "XNYS"
 
 @dataclass(frozen=True)
 class DataSource:
+    dataset: str
     data_type: str
     storage_format: str
     source_dir: Path
@@ -118,17 +119,25 @@ def build_sources(
     output_root: Path,
     data_type: str,
     storage_format: str,
+    dataset: str = "standard",
 ) -> list[DataSource]:
     """Build selected source/destination pairs from the project layout."""
     data_types = ("raw", "adjusted") if data_type == "all" else (data_type,)
     formats = ("csv", "parquet") if storage_format == "all" else (storage_format,)
-    input_roots = {
-        "raw": project_root / "market_data",
-        "adjusted": project_root / "adjust_market_data",
-    }
+    if dataset == "sip":
+        input_roots = {
+            "raw": project_root / "sip_market_data" / "raw",
+            "adjusted": project_root / "sip_market_data" / "adjusted",
+        }
+    else:
+        input_roots = {
+            "raw": project_root / "market_data",
+            "adjusted": project_root / "adjust_market_data",
+        }
 
     return [
         DataSource(
+            dataset=dataset,
             data_type=selected_type,
             storage_format=selected_format,
             source_dir=input_roots[selected_type] / selected_format,
@@ -163,14 +172,48 @@ def process_source(source: DataSource, calendar_name: str) -> tuple[int, int, in
         total_rows += len(dataframe)
         kept_rows += len(filtered)
         print(
-            f"[{index}/{len(input_files)}] {source.data_type}/{source.storage_format} "
+            f"[{index}/{len(input_files)}] {source.dataset}/"
+            f"{source.data_type}/{source.storage_format} "
             f"{input_path.name}: {len(dataframe):,} -> {len(filtered):,}행"
         )
 
     return processed_files, total_rows, kept_rows
 
 
-def choose_data_type() -> str:
+def choose_dataset() -> str:
+    """Prompt for the collected dataset to filter."""
+    choices = {
+        "": "standard",
+        "1": "standard",
+        "standard": "standard",
+        "5min": "standard",
+        "2": "sip",
+        "sip": "sip",
+        "1min": "sip",
+    }
+
+    print("=" * 54)
+    print(" [선택 1] 필터링할 원본 데이터셋을 선택해 주세요.")
+    print("  1. 기존 수집 데이터/5분봉 (기본값)")
+    print("  2. SIP 1분봉 데이터")
+    print("=" * 54)
+    while True:
+        try:
+            choice = input("선택 [1/2]: ").strip().lower()
+        except EOFError:
+            choice = ""
+        if choice in choices:
+            return choices[choice]
+        print("잘못된 입력입니다. 1(기존 데이터) 또는 2(SIP 1분봉)를 입력해 주세요.")
+
+
+def default_output_root(project_root: Path, dataset: str) -> Path:
+    """Return a separate output root so different feeds never mix."""
+    folder_name = "regular_sip_market_data" if dataset == "sip" else "regular_market_data"
+    return project_root / folder_name
+
+
+def choose_data_type(step_number: int = 1) -> str:
     """Prompt for the source price type when no CLI option was supplied."""
     choices = {
         "": "raw",
@@ -182,7 +225,7 @@ def choose_data_type() -> str:
     }
 
     print("=" * 50)
-    print(" [선택 1] 처리할 데이터 타입을 선택해 주세요.")
+    print(f" [선택 {step_number}] 처리할 데이터 타입을 선택해 주세요.")
     print("  1. Raw 데이터 (기본값)")
     print("  2. Adjusted 데이터 (배당/분할 수정주가 반영)")
     print("=" * 50)
@@ -198,7 +241,7 @@ def choose_data_type() -> str:
         print("잘못된 입력입니다. 1(Raw) 또는 2(Adjusted)를 입력해 주세요.")
 
 
-def choose_storage_format() -> str:
+def choose_storage_format(step_number: int = 2) -> str:
     """Prompt for the file format when no CLI option was supplied."""
     choices = {
         "": "csv",
@@ -211,7 +254,7 @@ def choose_storage_format() -> str:
     }
 
     print("\n" + "=" * 50)
-    print(" [선택 2] 처리할 파일 형식을 선택해 주세요.")
+    print(f" [선택 {step_number}] 처리할 파일 형식을 선택해 주세요.")
     print("  1. CSV (기본값)")
     print("  2. Parquet")
     print("=" * 50)
@@ -228,11 +271,15 @@ def choose_storage_format() -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    project_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description=(
             "거래소 공식 일정에 따라 미국 주식 정규장 봉만 별도 폴더에 저장합니다."
         )
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=("standard", "sip"),
+        help="원본 데이터셋 (미지정 시 실행 중 선택)",
     )
     parser.add_argument(
         "--data-type",
@@ -253,8 +300,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=project_root / "regular_market_data",
-        help="결과 루트 폴더 (기본값: 프로젝트의 regular_market_data)",
+        help="결과 루트 폴더 (미지정 시 데이터셋별 기본 폴더)",
     )
     return parser.parse_args(argv)
 
@@ -262,9 +308,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project_root = Path(__file__).resolve().parents[1]
-    output_root = args.output_dir.expanduser().resolve()
-    data_type = args.data_type or choose_data_type()
-    storage_format = args.storage_format or choose_storage_format()
+    dataset = args.dataset or choose_dataset()
+    output_root = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir
+        else default_output_root(project_root, dataset)
+    )
+    data_type = args.data_type or choose_data_type(step_number=2)
+    storage_format = args.storage_format or choose_storage_format(step_number=3)
 
     try:
         mcal.get_calendar(args.calendar)
@@ -273,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"캘린더: {args.calendar}")
+    print(f"원본 데이터셋: {dataset}")
     print(f"데이터 타입: {data_type}")
     print(f"파일 형식: {storage_format}")
     print(f"결과 폴더: {output_root}")
@@ -284,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root,
             data_type,
             storage_format,
+            dataset,
         )
         for source in sources:
             source_totals = process_source(source, args.calendar)

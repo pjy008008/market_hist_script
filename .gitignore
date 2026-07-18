@@ -8,6 +8,7 @@
 market_data/
 regular_market_data/
 sip_market_data/
+regular_sip_market_data/
 *.parquet
 *.csv
 *.txt
