@@ -1,4 +1,4 @@
-# 위키피디아에서 Ticker 불러오는 스크립트
+"""위키피디아에서 S&P 500 티커를 확인하는 스크립트."""
 
 import pandas as pd
 from datetime import datetime, timedelta

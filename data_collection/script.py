@@ -2,6 +2,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -9,14 +10,15 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import Adjustment  # 🛠️ 수정주가 옵션을 위한 임포트 추가
 from dotenv import load_dotenv
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(PROJECT_ROOT / ".env")
 
 # ==========================================
 # [설정 영역] 본인의 API 키 지정
 # ==========================================
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-TICKER_INFO_DIR = "./ticker_info"   # 티커 목록 저장용 폴더 경로
+TICKER_INFO_DIR = PROJECT_ROOT / "ticker_info"   # 티커 목록 저장용 폴더 경로
 TICKER_FILE = os.path.join(TICKER_INFO_DIR, "sp500_tickers_3years.txt")
 
 # Alpaca 클라이언트 초기화
@@ -256,7 +258,9 @@ def main():
     use_adjusted = choose_adjustment_option()
 
     # 3. 선택 조합에 따라 상위 및 하위 저장 폴더 구조 결정
-    parent_dir = "./adjust_market_data" if use_adjusted else "./market_data"
+    parent_dir = PROJECT_ROOT / (
+        "adjust_market_data" if use_adjusted else "market_data"
+    )
     storage_dir = os.path.join(parent_dir, storage_format)
     os.makedirs(storage_dir, exist_ok=True)
 

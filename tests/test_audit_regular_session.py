@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from audit_regular_session import audit_dataframe
+from data_validation.audit_regular_session import audit_dataframe
 
 
 class AuditRegularSessionTests(unittest.TestCase):

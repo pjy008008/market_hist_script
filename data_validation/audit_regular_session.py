@@ -10,7 +10,11 @@ from pathlib import Path
 import pandas as pd
 import pandas_market_calendars as mcal
 
-from filter_regular_session import (
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from data_filtering.filter_regular_session import (
     DEFAULT_CALENDAR,
     choose_data_type,
     choose_storage_format,
@@ -263,7 +267,6 @@ def audit_source(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    project_root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description="정규장 데이터의 종목별 기간과 누락된 5분봉 구간을 검사합니다."
     )
@@ -286,7 +289,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--report-dir",
         type=Path,
-        default=project_root / "report" / "regular_session_audit",
+        default=PROJECT_ROOT / "report" / "regular_session_audit",
         help="보고서 저장 폴더",
     )
     return parser.parse_args(argv)
@@ -296,7 +299,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     data_type = args.data_type or choose_data_type()
     storage_format = args.storage_format or choose_storage_format()
-    project_root = Path(__file__).resolve().parent
     report_dir = args.report_dir.expanduser().resolve()
 
     try:
@@ -307,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
 
     processed_files = 0
     for selected_type, selected_format, source_dir in selected_sources(
-        project_root, data_type, storage_format
+        PROJECT_ROOT, data_type, storage_format
     ):
         if not source_dir.is_dir():
             print(f"[건너뜀] 입력 폴더 없음: {source_dir}")

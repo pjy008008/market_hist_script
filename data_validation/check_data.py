@@ -4,9 +4,11 @@ import os
 import glob
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 
 # script.py에서 Parquet을 선택했을 때 저장되는 폴더 경로
-DATA_DIR = "./market_data/parquet"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = PROJECT_ROOT / "market_data" / "parquet"
 
 def check_single_parquet(file_path):
     """개별 Parquet 파일의 메타데이터 및 품질을 분석합니다."""

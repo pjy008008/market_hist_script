@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from filter_regular_session import (
+from data_filtering.filter_regular_session import (
     choose_data_type,
     choose_storage_format,
     filter_regular_session,

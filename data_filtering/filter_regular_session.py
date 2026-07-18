@@ -228,7 +228,7 @@ def choose_storage_format() -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    project_root = Path(__file__).resolve().parent
+    project_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description=(
             "거래소 공식 일정에 따라 미국 주식 정규장 봉만 별도 폴더에 저장합니다."
@@ -261,7 +261,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    project_root = Path(__file__).resolve().parent
+    project_root = Path(__file__).resolve().parents[1]
     output_root = args.output_dir.expanduser().resolve()
     data_type = args.data_type or choose_data_type()
     storage_format = args.storage_format or choose_storage_format()
