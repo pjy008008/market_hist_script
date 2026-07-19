@@ -47,8 +47,12 @@ report/regular_session_audit/
 └── {type}_{format}_missing_intervals.csv
 
 report/regular_sip_session_audit/
-├── {type}_{format}_summary.csv
-└── {type}_{format}_missing_intervals.csv
+├── 1min/
+│   ├── {type}_{format}_summary.csv
+│   └── {type}_{format}_missing_intervals.csv
+└── 5min/
+    ├── {type}_{format}_summary.csv
+    └── {type}_{format}_missing_intervals.csv
 ```
 
 - `summary.csv`: 종목별 관측 시작·종료일, 기대 봉, 누락 봉, 커버리지, 중복과 비정상 타임스탬프

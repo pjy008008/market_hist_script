@@ -53,3 +53,19 @@ regular_sip_market_data/
 ```
 
 기존 데이터 결과는 `regular_market_data/`, SIP 결과는 `regular_sip_market_data/`로 분리되므로 피드와 봉 간격이 섞이지 않습니다. 같은 조합을 다시 실행하면 최신 원본을 필터링한 결과로 대상 파일을 안전하게 교체합니다.
+
+### `resample_sip_5min.py`
+
+정규장 SIP Adjusted 1분봉을 종목·거래일별 5분봉으로 집계합니다. OHLC는 첫 시가, 최고 고가, 최저 저가, 마지막 종가를 사용하고 `volume`과 `trade_count`는 합산합니다. `vwap`은 1분봉 거래량으로 가중해 다시 계산하며, 각 구간에 실제로 존재한 1분봉 개수는 `source_minutes`로 저장합니다. 누락된 1분봉을 임의로 생성하거나 보간하지 않습니다.
+
+```bash
+python data_filtering/resample_sip_5min.py --format parquet
+```
+
+```text
+입력: regular_sip_market_data/adjusted/{format}/
+출력: regular_sip_5min_market_data/adjusted/{format}/
+파일: {TICKER}_5min_sip_historical.{format}
+```
+
+`daily_pipeline.py`를 실행하면 이 단계도 자동으로 수행됩니다.

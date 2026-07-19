@@ -16,6 +16,7 @@ script/
 │   └── README.md
 ├── data_filtering/               # 정규장 데이터 필터링
 │   ├── filter_regular_session.py
+│   ├── resample_sip_5min.py
 │   └── README.md
 ├── data_validation/              # 데이터 검사 및 보고서 생성
 │   ├── audit_regular_session.py
@@ -55,13 +56,19 @@ script/
 ├── regular_sip_market_data/      # SIP 1분봉 정규장 필터 결과
 │   ├── raw/{csv,parquet}/
 │   └── adjusted/{csv,parquet}/
+├── regular_sip_5min_market_data/ # 정규장 SIP 1분봉에서 생성한 5분봉
+│   └── adjusted/{csv,parquet}/
 ├── ticker_info/
 │   └── sp500_tickers_3years.txt
 └── report/
     ├── data_audit_report.txt
     ├── regular_sip_session_audit/
-    │   ├── adjusted_{format}_summary.csv
-    │   └── adjusted_{format}_missing_intervals.csv
+    │   ├── 1min/
+    │   │   ├── adjusted_{format}_summary.csv
+    │   │   └── adjusted_{format}_missing_intervals.csv
+    │   └── 5min/
+    │       ├── adjusted_{format}_summary.csv
+    │       └── adjusted_{format}_missing_intervals.csv
     └── regular_session_audit/
         ├── {type}_{format}_summary.csv
         └── {type}_{format}_missing_intervals.csv
@@ -75,9 +82,10 @@ script/
 | `sip_market_data/` | `data_collection/collect_sip_1min.py` | SIP 최근 3년 1분봉 Raw/Adjusted 데이터 |
 | `regular_market_data/` | `data_filtering/filter_regular_session.py` | 휴장·조기 폐장·서머타임을 반영한 정규장 데이터 |
 | `regular_sip_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
+| `regular_sip_5min_market_data/` | `data_filtering/resample_sip_5min.py` | 정규장 SIP 1분봉에서 집계한 5분봉 |
 | `report/data_audit_report.txt` | `data_validation/data_report.py` | Raw Parquet 전체 검사 보고서 |
 | `report/regular_session_audit/` | `data_validation/audit_regular_session.py` | 종목별 기간·커버리지와 누락 구간 CSV |
-| `report/regular_sip_session_audit/` | `daily_pipeline.py` | SIP 1분봉 기간·커버리지와 누락 구간 CSV |
+| `report/regular_sip_session_audit/` | `daily_pipeline.py` | SIP 1분봉·5분봉 기간, 커버리지와 누락 구간 CSV |
 
 ## 사전 준비
 
@@ -136,7 +144,8 @@ export ALPACA_SECRET_KEY="발급받은_SECRET_KEY"
 1. Wikipedia에서 현재 및 최근 3년 S&P 500 관련 티커 갱신
 2. Alpaca SIP Adjusted 1분봉 수집 또는 증분 갱신
 3. XNYS 캘린더로 정규장 데이터 분리
-4. 종목별 기간, 1분봉 커버리지와 누락 구간 보고서 생성
+4. 정규장 1분봉을 종목·거래일별 SIP 5분봉으로 집계
+5. 종목별 1분봉·5분봉 커버리지와 누락 구간 보고서 생성
 
 사용자가 선택하는 값은 CSV 또는 Parquet 형식뿐입니다. 피드는 SIP, 봉 간격은 1분, 가격은 Adjusted, 캘린더는 XNYS로 고정됩니다.
 
@@ -151,6 +160,8 @@ python daily_pipeline.py --format parquet
 ```
 
 종목 파일이 없으면 가장 최근에 완료된 거래 세션을 끝으로 최근 3년 전체를 수집합니다. 기존 파일이 있으면 마지막 타임스탬프 다음 1분부터 추가하고, 데이터는 계속 최근 3년 범위로 유지합니다.
+
+5분봉은 별도 API 호출 없이 정규장 1분봉에서 생성합니다. 시가/고가/저가/종가에는 각각 첫 값/최댓값/최솟값/마지막 값을 사용하고, 거래량과 체결 수는 합산하며 VWAP은 거래량 가중 방식으로 다시 계산합니다. 거래가 없어 없는 1분봉은 채우지 않고 각 5분봉의 실제 원천 행 수를 `source_minutes`에 기록합니다.
 
 마지막 수집 시점은 단순한 현재 시각이 아니라 `현재 UTC - 15분` 시점에 이미 폐장한 가장 최근 XNYS 세션입니다. 따라서 주말, 휴장, 조기폐장과 서머타임을 자동 반영하고 장중 실행 시에는 아직 끝나지 않은 당일 세션을 수집하지 않습니다. 서버에서는 미국 정규장 종료 15분 이후에 하루 한 번 실행하는 것을 권장합니다.
 
