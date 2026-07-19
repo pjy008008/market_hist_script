@@ -1,13 +1,18 @@
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
 from data_collection.collect_sip_1min import (
     collection_window,
+    earliest_changed_timestamp,
     merge_frames,
+    save_local_data,
     storage_path,
+    update_symbol_data,
 )
 
 
@@ -56,6 +61,59 @@ class CollectSipOneMinuteTests(unittest.TestCase):
 
         self.assertEqual(len(combined), 3)
         self.assertEqual(combined.loc[("AAPL", pd.Timestamp("2025-01-02 14:31:00Z")), "close"], 201)
+
+    def test_detects_first_adjusted_overlap_revision(self):
+        existing = self.make_frame(
+            ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
+            [100, 101],
+        )
+        refreshed = self.make_frame(
+            ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
+            [50, 50],
+        )
+
+        changed = earliest_changed_timestamp(existing, refreshed)
+
+        self.assertEqual(changed, pd.Timestamp("2025-01-02 14:30:00Z"))
+
+    def test_adjusted_revision_refreshes_full_rolling_window(self):
+        existing = self.make_frame(
+            ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
+            [100, 101],
+        )
+        refreshed = self.make_frame(
+            ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
+            [50, 50],
+        )
+        historical = self.make_frame(["2025-01-01 14:30:00Z"], [49])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            path = storage_path("AAPL", "adjusted", "csv", root)
+            save_local_data(existing, path, "csv")
+            with patch(
+                "data_collection.collect_sip_1min.fetch_range",
+                side_effect=[[refreshed], [historical]],
+            ) as mock_fetch:
+                result = update_symbol_data(
+                    Mock(),
+                    "AAPL",
+                    "adjusted",
+                    "csv",
+                    root,
+                    datetime(2025, 1, 1, tzinfo=timezone.utc),
+                    datetime(2025, 1, 2, 14, 32, tzinfo=timezone.utc),
+                    7,
+                    0,
+                    datetime(2025, 1, 2, 14, 30, tzinfo=timezone.utc),
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.adjustment_revision)
+        self.assertEqual(mock_fetch.call_count, 2)
+        self.assertEqual(
+            result.changed_from_utc,
+            pd.Timestamp("2025-01-01 14:30:00+00:00"),
+        )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +29,20 @@ END_DELAY_MINUTES = 15
 DEFAULT_CHUNK_DAYS = 7
 DEFAULT_REQUEST_DELAY_SECONDS = 0.35
 TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
+PRICE_COLUMNS = ("open", "high", "low", "close", "vwap")
+
+
+@dataclass(frozen=True)
+class CollectionResult:
+    """Outcome of one symbol update, including downstream invalidation metadata."""
+
+    success: bool
+    changed_from_utc: pd.Timestamp | None = None
+    adjustment_revision: bool = False
+    added_rows: int = 0
+
+    def __bool__(self) -> bool:
+        return self.success
 
 
 def choose_data_type() -> str:
@@ -176,6 +191,44 @@ def merge_frames(
     return trim_to_window(combined, start_time, end_time)
 
 
+def earliest_changed_timestamp(
+    existing: pd.DataFrame,
+    refreshed: pd.DataFrame,
+    columns: tuple[str, ...] = (*PRICE_COLUMNS, "volume", "trade_count"),
+) -> pd.Timestamp | None:
+    """Return the first overlapping bar whose stored market values changed."""
+    if existing.empty or refreshed.empty:
+        return None
+
+    overlap = existing.index.intersection(refreshed.index)
+    compared_columns = [
+        column
+        for column in columns
+        if column in existing.columns and column in refreshed.columns
+    ]
+    if overlap.empty or not compared_columns:
+        return None
+
+    left = existing.loc[overlap, compared_columns].sort_index()
+    right = refreshed.loc[overlap, compared_columns].sort_index()
+    left_numeric = left.apply(pd.to_numeric, errors="coerce")
+    right_numeric = right.apply(pd.to_numeric, errors="coerce")
+    tolerance = 1e-10 * left_numeric.abs().clip(lower=1)
+    equal = (
+        left.eq(right)
+        | (left.isna() & right.isna())
+        | (left_numeric.sub(right_numeric).abs() <= tolerance)
+    )
+    changed = ~equal.all(axis=1)
+    if not changed.any():
+        return None
+
+    timestamp = left.index[changed][0]
+    if isinstance(timestamp, tuple):
+        timestamp = timestamp[left.index.names.index("timestamp")]
+    return pd.Timestamp(timestamp).tz_convert("UTC")
+
+
 def fetch_chunk(
     client: StockHistoricalDataClient,
     symbol: str,
@@ -305,6 +358,122 @@ def process_symbol(
         f"[{symbol}] 저장 완료: +{added_rows:,}행, 총 {len(combined):,}행 -> {file_path}"
     )
     return True
+
+
+def update_symbol_data(
+    client: StockHistoricalDataClient,
+    symbol: str,
+    data_type: str,
+    storage_format: str,
+    output_root: Path,
+    start_time: datetime,
+    end_time: datetime,
+    chunk_days: int,
+    request_delay: float,
+    refresh_start: datetime | None = None,
+) -> CollectionResult:
+    """Append data and re-fetch adjusted overlap to detect historical revisions."""
+    file_path = storage_path(symbol, data_type, storage_format, output_root)
+    existing = pd.DataFrame()
+    if file_path.exists():
+        try:
+            existing = trim_to_window(
+                load_local_data(file_path, storage_format), start_time, end_time
+            )
+        except (OSError, ValueError, ImportError) as exc:
+            print(f"[{symbol}] 기존 데이터 읽기 실패: {exc}")
+            return CollectionResult(False)
+
+    if existing.empty:
+        fetch_start = start_time
+    else:
+        last_timestamp = pd.Timestamp(
+            existing.index.get_level_values("timestamp").max()
+        ).to_pydatetime()
+        fetch_start = max(start_time, last_timestamp + timedelta(minutes=1))
+        if refresh_start is not None:
+            fetch_start = max(start_time, min(fetch_start, refresh_start))
+
+    new_frames: list[pd.DataFrame] = []
+    if fetch_start < end_time:
+        fetched = fetch_range(
+            client,
+            symbol,
+            fetch_start,
+            end_time,
+            data_type,
+            chunk_days,
+            request_delay,
+        )
+        if fetched is None:
+            return CollectionResult(False)
+        new_frames = fetched
+
+    refreshed = (
+        pd.concat(new_frames).sort_index()
+        if new_frames
+        else existing.iloc[0:0].copy()
+    )
+    overlap_changed = earliest_changed_timestamp(existing, refreshed)
+    adjusted_price_changed = earliest_changed_timestamp(
+        existing, refreshed, PRICE_COLUMNS
+    )
+    adjustment_revision = (
+        data_type == "adjusted" and adjusted_price_changed is not None
+    )
+
+    if adjustment_revision and fetch_start > start_time:
+        print(
+            f"[{symbol}] 수정주가 이력 변경 감지: "
+            f"{adjusted_price_changed.isoformat()}, 최근 3년 전체를 갱신합니다."
+        )
+        historical_frames = fetch_range(
+            client,
+            symbol,
+            start_time,
+            fetch_start,
+            data_type,
+            chunk_days,
+            request_delay,
+        )
+        if historical_frames is None:
+            return CollectionResult(False)
+        new_frames = [*historical_frames, *new_frames]
+        refreshed = pd.concat(new_frames).sort_index()
+
+    combined = merge_frames(existing, new_frames, start_time, end_time)
+    if combined.empty:
+        return CollectionResult(True)
+
+    save_local_data(combined, file_path, storage_format)
+    added_rows = len(refreshed.index.difference(existing.index))
+    new_indexes = refreshed.index.difference(existing.index)
+    first_new: pd.Timestamp | None = None
+    if not new_indexes.empty:
+        timestamp = new_indexes[0]
+        if isinstance(timestamp, tuple):
+            timestamp = timestamp[refreshed.index.names.index("timestamp")]
+        first_new = pd.Timestamp(timestamp).tz_convert("UTC")
+
+    changed_values = [
+        value for value in (overlap_changed, first_new) if value is not None
+    ]
+    changed_from = min(changed_values) if changed_values else None
+    if adjustment_revision:
+        first_index = combined.index[0]
+        if isinstance(first_index, tuple):
+            first_index = first_index[combined.index.names.index("timestamp")]
+        changed_from = pd.Timestamp(first_index).tz_convert("UTC")
+
+    print(
+        f"[{symbol}] 저장 완료: +{added_rows:,}행, 총 {len(combined):,}행 -> {file_path}"
+    )
+    return CollectionResult(
+        True,
+        changed_from_utc=changed_from,
+        adjustment_revision=adjustment_revision,
+        added_rows=added_rows,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
