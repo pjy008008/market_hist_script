@@ -55,7 +55,7 @@ script/
 ├── regular_market_data/          # 정규장 필터 결과
 │   ├── raw/{csv,parquet}/
 │   └── adjusted/{csv,parquet}/
-├── regular_sip_market_data/      # SIP 1분봉 정규장 필터 결과
+├── regular_sip_1min_market_data/ # SIP 1분봉 정규장 필터 결과
 │   ├── raw/{csv,parquet}/
 │   └── adjusted/{csv,parquet}/
 ├── regular_sip_5min_market_data/ # 정규장 SIP 1분봉에서 생성한 5분봉
@@ -87,7 +87,7 @@ script/
 | `ticker_info/` | `data_collection/script.py` | 수집 대상 티커 목록 |
 | `sip_market_data/` | `data_collection/collect_sip_1min.py` | SIP 최근 3년 1분봉 Raw/Adjusted 데이터 |
 | `regular_market_data/` | `data_filtering/filter_regular_session.py` | 휴장·조기 폐장·서머타임을 반영한 정규장 데이터 |
-| `regular_sip_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
+| `regular_sip_1min_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
 | `regular_sip_5min_market_data/` | `data_filtering/resample_sip_5min.py` | 정규장 SIP 1분봉에서 집계한 5분봉 |
 | `pipeline_state/daily_pipeline_state.json` | `daily_pipeline.py` | 종목별 수집·품질 검사·필터·5분봉 생성 체크포인트와 최근 실행 상태 |
 | `report/latest/{format}/` | `daily_pipeline.py` | 마지막 실행의 요약, 실패 목록과 품질 검사 결과 |

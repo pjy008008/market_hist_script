@@ -28,7 +28,7 @@ python data_validation/data_report.py
 
 ### `audit_regular_session.py`
 
-`regular_market_data/` 또는 `regular_sip_market_data/`의 선택한 Raw/Adjusted 및 CSV/Parquet 결과에서 종목별 시작·종료일, 기대 봉 수, 누락 봉, 커버리지와 연속 누락 구간을 계산합니다. standard 데이터셋은 5분, SIP 데이터셋은 1분 간격을 사용합니다. 누락 봉을 채우거나 원본을 수정하지 않습니다.
+`regular_market_data/` 또는 `regular_sip_1min_market_data/`의 선택한 Raw/Adjusted 및 CSV/Parquet 결과에서 종목별 시작·종료일, 기대 봉 수, 누락 봉, 커버리지와 연속 누락 구간을 계산합니다. standard 데이터셋은 5분, SIP 데이터셋은 1분 간격을 사용합니다. 누락 봉을 채우거나 원본을 수정하지 않습니다.
 
 ```bash
 python data_validation/audit_regular_session.py
