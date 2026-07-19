@@ -7,8 +7,10 @@ from unittest.mock import Mock, patch
 import pandas as pd
 
 from data_collection.collect_sip_1min import (
+    alpaca_symbol,
     collection_window,
     earliest_changed_timestamp,
+    fetch_chunk,
     merge_frames,
     save_local_data,
     storage_path,
@@ -41,6 +43,27 @@ class CollectSipOneMinuteTests(unittest.TestCase):
             path,
             Path("sip_market_data/adjusted/parquet/BRK-B_1min_sip_historical.parquet"),
         )
+
+    def test_alpaca_symbol_uses_dot_for_class_shares(self):
+        self.assertEqual(alpaca_symbol("BRK/B"), "BRK.B")
+        self.assertEqual(alpaca_symbol("BF/B"), "BF.B")
+        self.assertEqual(alpaca_symbol("AAPL"), "AAPL")
+
+    def test_fetch_chunk_sends_alpaca_class_share_symbol(self):
+        client = Mock()
+        client.get_stock_bars.return_value = Mock(df=pd.DataFrame())
+
+        result = fetch_chunk(
+            client,
+            "BRK/B",
+            datetime(2025, 1, 1, tzinfo=timezone.utc),
+            datetime(2025, 1, 2, tzinfo=timezone.utc),
+            "adjusted",
+        )
+
+        request = client.get_stock_bars.call_args.args[0]
+        self.assertEqual(request.symbol_or_symbols, ["BRK.B"])
+        self.assertTrue(result.empty)
 
     def test_merge_deduplicates_and_keeps_latest_value_inside_window(self):
         existing = self.make_frame(

@@ -45,6 +45,11 @@ class CollectionResult:
         return self.success
 
 
+def alpaca_symbol(symbol: str) -> str:
+    """Convert the ticker-list class-share separator to Alpaca's notation."""
+    return symbol.replace("/", ".")
+
+
 def choose_data_type() -> str:
     choices = {
         "": "raw",
@@ -248,7 +253,7 @@ def fetch_chunk(
 ) -> pd.DataFrame | None:
     adjustment = Adjustment.ALL if data_type == "adjusted" else Adjustment.RAW
     request = StockBarsRequest(
-        symbol_or_symbols=[symbol],
+        symbol_or_symbols=[alpaca_symbol(symbol)],
         timeframe=TimeFrame.Minute,
         start=start_time,
         end=end_time,
