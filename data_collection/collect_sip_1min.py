@@ -191,6 +191,13 @@ def merge_frames(
     return trim_to_window(combined, start_time, end_time)
 
 
+def deduplicate_bars(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Keep the last bar when adjacent API chunks share a boundary timestamp."""
+    if dataframe.empty:
+        return dataframe.copy()
+    return dataframe.loc[~dataframe.index.duplicated(keep="last")].sort_index()
+
+
 def earliest_changed_timestamp(
     existing: pd.DataFrame,
     refreshed: pd.DataFrame,
@@ -200,6 +207,8 @@ def earliest_changed_timestamp(
     if existing.empty or refreshed.empty:
         return None
 
+    existing = deduplicate_bars(existing)
+    refreshed = deduplicate_bars(refreshed)
     overlap = existing.index.intersection(refreshed.index)
     compared_columns = [
         column
@@ -410,7 +419,7 @@ def update_symbol_data(
         new_frames = fetched
 
     refreshed = (
-        pd.concat(new_frames).sort_index()
+        deduplicate_bars(pd.concat(new_frames))
         if new_frames
         else existing.iloc[0:0].copy()
     )
@@ -439,7 +448,7 @@ def update_symbol_data(
         if historical_frames is None:
             return CollectionResult(False)
         new_frames = [*historical_frames, *new_frames]
-        refreshed = pd.concat(new_frames).sort_index()
+        refreshed = deduplicate_bars(pd.concat(new_frames))
 
     combined = merge_frames(existing, new_frames, start_time, end_time)
     if combined.empty:

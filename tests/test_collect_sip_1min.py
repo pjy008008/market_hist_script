@@ -76,6 +76,65 @@ class CollectSipOneMinuteTests(unittest.TestCase):
 
         self.assertEqual(changed, pd.Timestamp("2025-01-02 14:30:00Z"))
 
+    def test_comparison_deduplicates_overlapping_chunk_boundaries(self):
+        existing = self.make_frame(
+            ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
+            [100, 101],
+        )
+        refreshed = self.make_frame(
+            [
+                "2025-01-02 14:30:00Z",
+                "2025-01-02 14:31:00Z",
+                "2025-01-02 14:31:00Z",
+            ],
+            [100, 101, 101],
+        )
+
+        changed = earliest_changed_timestamp(existing, refreshed)
+
+        self.assertIsNone(changed)
+
+    def test_update_saves_when_fetched_chunks_share_a_boundary_bar(self):
+        existing = self.make_frame(
+            ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
+            [100, 101],
+        )
+        first_chunk = self.make_frame(
+            ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
+            [100, 101],
+        )
+        second_chunk = self.make_frame(
+            ["2025-01-02 14:31:00Z", "2025-01-02 14:32:00Z"],
+            [101, 102],
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            path = storage_path("AAPL", "adjusted", "csv", root)
+            save_local_data(existing, path, "csv")
+            with patch(
+                "data_collection.collect_sip_1min.fetch_range",
+                return_value=[first_chunk, second_chunk],
+            ):
+                result = update_symbol_data(
+                    Mock(),
+                    "AAPL",
+                    "adjusted",
+                    "csv",
+                    root,
+                    datetime(2025, 1, 1, tzinfo=timezone.utc),
+                    datetime(2025, 1, 2, 14, 33, tzinfo=timezone.utc),
+                    7,
+                    0,
+                    datetime(2025, 1, 2, 14, 30, tzinfo=timezone.utc),
+                )
+
+            saved = pd.read_csv(path)
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.adjustment_revision)
+        self.assertEqual(result.added_rows, 1)
+        self.assertEqual(len(saved), 3)
+
     def test_adjusted_revision_refreshes_full_rolling_window(self):
         existing = self.make_frame(
             ["2025-01-02 14:30:00Z", "2025-01-02 14:31:00Z"],
