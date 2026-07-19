@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -12,8 +12,10 @@ from daily_pipeline import (
     completed_collection_window,
     load_pipeline_symbols,
     parse_args,
+    run_collection,
     run_pipeline,
 )
+from pipeline_state import PipelineStateStore
 
 
 class DailyPipelineTests(unittest.TestCase):
@@ -89,28 +91,75 @@ class DailyPipelineTests(unittest.TestCase):
             patch("daily_pipeline.load_dotenv"),
             patch("daily_pipeline.completed_collection_window", return_value=window),
             patch("daily_pipeline.load_pipeline_symbols", return_value=["AAPL"]),
+            patch("daily_pipeline.PipelineStateStore") as mock_state_class,
             patch("daily_pipeline.StockHistoricalDataClient") as mock_client,
             patch("daily_pipeline.run_collection", return_value=[]) as mock_collect,
-            patch("daily_pipeline.run_filter", return_value=(1, 100, 80)) as mock_filter,
+            patch(
+                "daily_pipeline.run_filter",
+                return_value=(1, 100, 80, []),
+            ) as mock_filter,
             patch(
                 "daily_pipeline.run_resample",
-                return_value=(1, 80, 16),
+                return_value=(1, 80, 16, []),
             ) as mock_resample,
             patch("daily_pipeline.run_validation", return_value=(1, 0)) as mock_audit,
+            patch("daily_pipeline.save_failure_report") as mock_failure_report,
         ):
             result = run_pipeline("parquet")
 
         self.assertEqual(result, 0)
+        state = mock_state_class.return_value
         mock_collect.assert_called_once_with(
             mock_client.return_value,
             ["AAPL"],
             "parquet",
             window[0],
             window[1],
+            state,
+            pd.Timestamp(window[1]).isoformat(),
         )
-        mock_filter.assert_called_once_with("parquet")
-        mock_resample.assert_called_once_with("parquet")
+        mock_filter.assert_called_once_with(
+            "parquet",
+            ["AAPL"],
+            state,
+            pd.Timestamp(window[1]).isoformat(),
+            window[0],
+            window[1],
+        )
+        mock_resample.assert_called_once_with(
+            "parquet",
+            ["AAPL"],
+            state,
+            pd.Timestamp(window[1]).isoformat(),
+            window[0],
+            window[1],
+        )
         mock_audit.assert_called_once_with("parquet")
+        mock_failure_report.assert_called_once_with(
+            [], "parquet", pd.Timestamp(window[1]).isoformat()
+        )
+        state.finish_run.assert_called_once_with("success", [])
+
+    @patch("daily_pipeline.process_symbol", side_effect=[False, True])
+    def test_collection_retries_only_failed_symbol(self, mock_process):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = PipelineStateStore(Path(temporary_directory) / "state.json")
+            failures = run_collection(
+                Mock(),
+                ["AAPL"],
+                "csv",
+                datetime(2022, 1, 1, tzinfo=timezone.utc),
+                datetime(2025, 1, 1, tzinfo=timezone.utc),
+                state,
+                "2025-01-01T00:00:00+00:00",
+                retry_delay=0,
+            )
+
+            self.assertEqual(failures, [])
+            self.assertEqual(mock_process.call_count, 2)
+            checkpoint = state.data["checkpoints"]["csv"]["AAPL"]["collection"]
+            self.assertEqual(checkpoint["status"], "success")
+            self.assertEqual(checkpoint["attempt"], 2)
 
 
 if __name__ == "__main__":

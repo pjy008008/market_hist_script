@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,19 +21,22 @@ from data_collection.collect_sip_1min import (
     END_DELAY_MINUTES,
     YEARS_TO_COLLECT,
     process_symbol,
+    storage_path,
 )
 from data_collection.get_ticker import get_historical_sp500_tickers
 from data_filtering.filter_regular_session import (
     DEFAULT_CALENDAR,
     build_sources,
-    process_source,
+    process_file_incrementally,
 )
 from data_filtering.resample_sip_5min import (
     DESTINATION_ROOT as RESAMPLED_ROOT,
     build_resample_source,
-    process_resample_source,
+    output_file_name,
+    process_resample_file_incrementally,
 )
 from data_validation.audit_regular_session import audit_source, save_report
+from pipeline_state import PipelineStateStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -44,6 +49,9 @@ TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
 COLLECTION_ROOT = PROJECT_ROOT / "sip_market_data"
 FILTERED_ROOT = PROJECT_ROOT / "regular_sip_market_data"
 REPORT_ROOT = PROJECT_ROOT / "report" / "regular_sip_session_audit"
+FAILURE_REPORT_PATH = PROJECT_ROOT / "report" / "pipeline_failures.json"
+MAX_SYMBOL_ATTEMPTS = 3
+SYMBOL_RETRY_DELAY_SECONDS = 5
 
 
 def choose_storage_format() -> str:
@@ -158,27 +166,89 @@ def run_collection(
     storage_format: str,
     start_time: datetime,
     end_time: datetime,
-) -> list[str]:
-    failed_symbols: list[str] = []
-    for index, symbol in enumerate(symbols, 1):
-        print(f"\n[{index}/{len(symbols)}] {symbol} 수집 또는 갱신")
-        succeeded = process_symbol(
-            client,
-            symbol,
-            DATA_TYPE,
-            storage_format,
-            COLLECTION_ROOT,
-            start_time,
-            end_time,
-            DEFAULT_CHUNK_DAYS,
-            DEFAULT_REQUEST_DELAY_SECONDS,
-        )
-        if not succeeded:
-            failed_symbols.append(symbol)
-    return failed_symbols
+    state: PipelineStateStore,
+    target_session_utc: str,
+    retry_delay: float = SYMBOL_RETRY_DELAY_SECONDS,
+) -> list[dict[str, object]]:
+    pending = list(symbols)
+    last_attempts: dict[str, int] = {}
+    for attempt in range(1, MAX_SYMBOL_ATTEMPTS + 1):
+        if not pending:
+            break
+        if attempt > 1:
+            print(f"\n수집 실패 종목 재시도 {attempt}/{MAX_SYMBOL_ATTEMPTS}: {len(pending)}개")
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+
+        failed_this_round: list[str] = []
+        for index, symbol in enumerate(pending, 1):
+            file_path = storage_path(
+                symbol,
+                DATA_TYPE,
+                storage_format,
+                COLLECTION_ROOT,
+            )
+            if state.is_complete(
+                storage_format,
+                symbol,
+                "collection",
+                target_session_utc,
+                file_path,
+            ):
+                print(f"[{index}/{len(pending)}] {symbol} 수집 체크포인트 완료 - 건너뜀")
+                continue
+
+            print(f"\n[{index}/{len(pending)}] {symbol} 수집 또는 갱신 (시도 {attempt})")
+            last_attempts[symbol] = attempt
+            try:
+                succeeded = process_symbol(
+                    client,
+                    symbol,
+                    DATA_TYPE,
+                    storage_format,
+                    COLLECTION_ROOT,
+                    start_time,
+                    end_time,
+                    DEFAULT_CHUNK_DAYS,
+                    DEFAULT_REQUEST_DELAY_SECONDS,
+                )
+                error = "" if succeeded else "종목 수집 처리 실패"
+            except Exception as exc:
+                succeeded = False
+                error = str(exc)
+
+            state.mark_stage(
+                storage_format,
+                symbol,
+                "collection",
+                "success" if succeeded else "failed",
+                target_session_utc,
+                attempt,
+                error,
+            )
+            if not succeeded:
+                failed_this_round.append(symbol)
+        pending = failed_this_round
+
+    return [
+        {
+            "stage": "collection",
+            "symbol": symbol,
+            "attempts": last_attempts.get(symbol, MAX_SYMBOL_ATTEMPTS),
+            "error": "자동 재시도 후에도 수집 실패",
+        }
+        for symbol in pending
+    ]
 
 
-def run_filter(storage_format: str) -> tuple[int, int, int]:
+def run_filter(
+    storage_format: str,
+    symbols: list[str],
+    state: PipelineStateStore,
+    target_session_utc: str,
+    start_time: datetime,
+    end_time: datetime,
+) -> tuple[int, int, int, list[dict[str, object]]]:
     source = build_sources(
         PROJECT_ROOT,
         FILTERED_ROOT,
@@ -186,12 +256,118 @@ def run_filter(storage_format: str) -> tuple[int, int, int]:
         storage_format,
         DATASET,
     )[0]
-    return process_source(source, DEFAULT_CALENDAR)
+    completed_files = 0
+    candidate_rows = 0
+    filtered_rows = 0
+    failures: list[dict[str, object]] = []
+    for index, symbol in enumerate(symbols, 1):
+        input_path = storage_path(
+            symbol, DATA_TYPE, storage_format, COLLECTION_ROOT
+        )
+        output_path = source.destination_dir / input_path.name
+        if state.is_complete(
+            storage_format,
+            symbol,
+            "filter",
+            target_session_utc,
+            output_path,
+        ):
+            print(f"[{index}/{len(symbols)}] {symbol} 필터 체크포인트 완료 - 건너뜀")
+            completed_files += 1
+            continue
+        try:
+            processed, kept, total = process_file_incrementally(
+                input_path,
+                output_path,
+                storage_format,
+                pd.Timestamp(start_time),
+                pd.Timestamp(end_time),
+                DEFAULT_CALENDAR,
+            )
+            state.mark_stage(
+                storage_format,
+                symbol,
+                "filter",
+                "success",
+                target_session_utc,
+                1,
+                details={"output_rows": total},
+            )
+            completed_files += 1
+            candidate_rows += processed
+            filtered_rows += kept
+            print(f"[{index}/{len(symbols)}] {symbol}: 증분 {processed:,} -> 정규장 {kept:,}행")
+        except (OSError, ValueError, ImportError) as exc:
+            state.mark_stage(
+                storage_format, symbol, "filter", "failed", target_session_utc, 1, str(exc)
+            )
+            failures.append({"stage": "filter", "symbol": symbol, "attempts": 1, "error": str(exc)})
+    return completed_files, candidate_rows, filtered_rows, failures
 
 
-def run_resample(storage_format: str) -> tuple[int, int, int]:
+def run_resample(
+    storage_format: str,
+    symbols: list[str],
+    state: PipelineStateStore,
+    target_session_utc: str,
+    start_time: datetime,
+    end_time: datetime,
+) -> tuple[int, int, int, list[dict[str, object]]]:
     source = build_resample_source(storage_format)
-    return process_resample_source(source, DEFAULT_CALENDAR)
+    completed_files = 0
+    candidate_rows = 0
+    five_minute_rows = 0
+    failures: list[dict[str, object]] = []
+    for index, symbol in enumerate(symbols, 1):
+        input_name = f"{symbol.replace('/', '-')}_1min_sip_historical.{storage_format}"
+        input_path = source.source_dir / input_name
+        output_path = source.destination_dir / output_file_name(input_path)
+        if state.is_complete(
+            storage_format,
+            symbol,
+            "resample_5min",
+            target_session_utc,
+            output_path,
+        ):
+            print(f"[{index}/{len(symbols)}] {symbol} 5분봉 체크포인트 완료 - 건너뜀")
+            completed_files += 1
+            continue
+        try:
+            processed, created, total = process_resample_file_incrementally(
+                input_path,
+                output_path,
+                storage_format,
+                pd.Timestamp(start_time),
+                pd.Timestamp(end_time),
+                DEFAULT_CALENDAR,
+            )
+            state.mark_stage(
+                storage_format,
+                symbol,
+                "resample_5min",
+                "success",
+                target_session_utc,
+                1,
+                details={"output_rows": total},
+            )
+            completed_files += 1
+            candidate_rows += processed
+            five_minute_rows += created
+            print(f"[{index}/{len(symbols)}] {symbol}: 증분 1분봉 {processed:,} -> 5분봉 {created:,}행")
+        except (OSError, ValueError, ImportError) as exc:
+            state.mark_stage(
+                storage_format,
+                symbol,
+                "resample_5min",
+                "failed",
+                target_session_utc,
+                1,
+                str(exc),
+            )
+            failures.append(
+                {"stage": "resample_5min", "symbol": symbol, "attempts": 1, "error": str(exc)}
+            )
+    return completed_files, candidate_rows, five_minute_rows, failures
 
 
 def run_validation(storage_format: str) -> tuple[int, int]:
@@ -228,6 +404,32 @@ def run_validation(storage_format: str) -> tuple[int, int]:
     return total_files, total_errors
 
 
+def save_failure_report(
+    failures: list[dict[str, object]],
+    storage_format: str,
+    target_session_utc: str,
+) -> None:
+    """Atomically write the latest failed-symbol report for server monitoring."""
+    FAILURE_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = FAILURE_REPORT_PATH.with_name(
+        f".{FAILURE_REPORT_PATH.name}.tmp"
+    )
+    payload = {
+        "storage_format": storage_format,
+        "target_session_utc": target_session_utc,
+        "failure_count": len(failures),
+        "failures": failures,
+    }
+    try:
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, FAILURE_REPORT_PATH)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
     load_dotenv(PROJECT_ROOT / ".env")
     api_key = os.getenv("ALPACA_API_KEY")
@@ -240,9 +442,13 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         start_time, end_time = completed_collection_window(now)
         print("Wikipedia에서 최근 3년 S&P 500 관련 티커를 갱신합니다...")
         symbols = load_pipeline_symbols()
+        state = PipelineStateStore()
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[오류] 실행 준비 실패: {exc}", file=sys.stderr)
         return 1
+
+    target_session_utc = pd.Timestamp(end_time).isoformat()
+    state.begin_run(storage_format, target_session_utc)
 
     print("=" * 72)
     print("일일 통합 파이프라인")
@@ -256,46 +462,99 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
 
     client = StockHistoricalDataClient(api_key, secret_key)
     print("\n[1/4] SIP Adjusted 1분봉 수집·증분 갱신")
-    failed_symbols = run_collection(
+    failures = run_collection(
         client,
         symbols,
         storage_format,
         start_time,
         end_time,
+        state,
+        target_session_utc,
     )
+    failed_collection_symbols = {
+        str(failure["symbol"]) for failure in failures
+    }
+    collected_symbols = [
+        symbol for symbol in symbols if symbol not in failed_collection_symbols
+    ]
 
     print("\n[2/4] XNYS 정규장 1분봉 필터링")
     try:
-        processed_files, total_rows, kept_rows = run_filter(storage_format)
+        processed_files, total_rows, kept_rows, filter_failures = run_filter(
+            storage_format,
+            collected_symbols,
+            state,
+            target_session_utc,
+            start_time,
+            end_time,
+        )
+        failures.extend(filter_failures)
         if processed_files == 0:
             raise RuntimeError("필터링할 수집 파일이 없습니다.")
 
         print("\n[3/4] 정규장 1분봉에서 SIP 5분봉 생성")
-        resampled_files, one_minute_rows, five_minute_rows = run_resample(
-            storage_format
+        failed_filter_symbols = {
+            str(failure["symbol"]) for failure in filter_failures
+        }
+        filtered_symbols = [
+            symbol
+            for symbol in collected_symbols
+            if symbol not in failed_filter_symbols
+        ]
+        (
+            resampled_files,
+            one_minute_rows,
+            five_minute_rows,
+            resample_failures,
+        ) = run_resample(
+            storage_format,
+            filtered_symbols,
+            state,
+            target_session_utc,
+            start_time,
+            end_time,
         )
+        failures.extend(resample_failures)
         if resampled_files == 0:
             raise RuntimeError("5분봉으로 변환할 정규장 1분봉 파일이 없습니다.")
 
         print("\n[4/4] SIP 1분봉·5분봉 기간 및 누락 구간 검사")
         audited_files, audit_errors = run_validation(storage_format)
     except (OSError, RuntimeError, ValueError, ImportError) as exc:
+        failures.append(
+            {"stage": "postprocess", "symbol": "*", "attempts": 1, "error": str(exc)}
+        )
+        save_failure_report(failures, storage_format, target_session_utc)
+        state.finish_run("failed", failures)
         print(f"[오류] 후처리 실패: {exc}", file=sys.stderr)
         return 1
 
+
+    if audit_errors:
+        failures.append(
+            {
+                "stage": "validation",
+                "symbol": "*",
+                "attempts": 1,
+                "error": f"검사 오류 파일 {audit_errors}개",
+            }
+        )
+    save_failure_report(failures, storage_format, target_session_utc)
+    state.finish_run("failed" if failures else "success", failures)
+
     print("=" * 72)
     print(
-        f"완료: 수집 성공 {len(symbols) - len(failed_symbols)}/{len(symbols)}개, "
+        f"완료: 수집 성공 {len(symbols) - len(failed_collection_symbols)}/{len(symbols)}개, "
         f"1분봉 필터 {processed_files}개 파일 ({total_rows:,} -> {kept_rows:,}행), "
         f"5분봉 {resampled_files}개 파일 "
         f"({one_minute_rows:,} -> {five_minute_rows:,}행), "
         f"검사 {audited_files}개 파일"
     )
-    if failed_symbols:
-        print("수집 실패 종목: " + ", ".join(failed_symbols))
+    if failures:
+        print(f"최종 실패 {len(failures)}건: {FAILURE_REPORT_PATH}")
     if audit_errors:
         print(f"검사 오류 파일: {audit_errors}개")
-    return 1 if failed_symbols or audit_errors else 0
+    return 1 if failures else 0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
