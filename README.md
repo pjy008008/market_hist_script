@@ -9,6 +9,7 @@ Wikipedia와 Alpaca에서 최근 3년의 S&P 500 관련 종목을 수집하고, 
 ```text
 script/
 ├── daily_pipeline.py             # SIP 1분봉 일일 통합 파이프라인
+├── pipeline_state.py             # 종목별 실행 체크포인트 관리
 ├── data_collection/              # API 호출 및 크롤링
 │   ├── script.py
 │   ├── collect_sip_1min.py
@@ -60,8 +61,11 @@ script/
 │   └── adjusted/{csv,parquet}/
 ├── ticker_info/
 │   └── sp500_tickers_3years.txt
+├── pipeline_state/
+│   └── daily_pipeline_state.json # 종목·형식·단계별 체크포인트
 └── report/
     ├── data_audit_report.txt
+    ├── pipeline_failures.json    # 마지막 실행의 최종 실패 목록
     ├── regular_sip_session_audit/
     │   ├── 1min/
     │   │   ├── adjusted_{format}_summary.csv
@@ -83,6 +87,8 @@ script/
 | `regular_market_data/` | `data_filtering/filter_regular_session.py` | 휴장·조기 폐장·서머타임을 반영한 정규장 데이터 |
 | `regular_sip_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
 | `regular_sip_5min_market_data/` | `data_filtering/resample_sip_5min.py` | 정규장 SIP 1분봉에서 집계한 5분봉 |
+| `pipeline_state/daily_pipeline_state.json` | `daily_pipeline.py` | 종목별 수집·필터·5분봉 생성 체크포인트와 최근 실행 상태 |
+| `report/pipeline_failures.json` | `daily_pipeline.py` | 자동 재시도 후에도 실패한 종목과 단계 |
 | `report/data_audit_report.txt` | `data_validation/data_report.py` | Raw Parquet 전체 검사 보고서 |
 | `report/regular_session_audit/` | `data_validation/audit_regular_session.py` | 종목별 기간·커버리지와 누락 구간 CSV |
 | `report/regular_sip_session_audit/` | `daily_pipeline.py` | SIP 1분봉·5분봉 기간, 커버리지와 누락 구간 CSV |
@@ -159,13 +165,15 @@ python daily_pipeline.py
 python daily_pipeline.py --format parquet
 ```
 
-종목 파일이 없으면 가장 최근에 완료된 거래 세션을 끝으로 최근 3년 전체를 수집합니다. 기존 파일이 있으면 마지막 타임스탬프 다음 1분부터 추가하고, 데이터는 계속 최근 3년 범위로 유지합니다.
+종목 파일이 없으면 가장 최근에 완료된 거래 세션을 끝으로 최근 3년 전체를 수집합니다. 기존 파일이 있으면 마지막 타임스탬프 다음 1분부터 추가하고, 데이터는 계속 최근 3년 범위로 유지합니다. 정규장 필터와 5분봉 생성도 전체 3년을 다시 계산하지 않고 마지막 저장 세션을 안전하게 한 번 재계산한 뒤 새 세션만 병합합니다.
 
 5분봉은 별도 API 호출 없이 정규장 1분봉에서 생성합니다. 시가/고가/저가/종가에는 각각 첫 값/최댓값/최솟값/마지막 값을 사용하고, 거래량과 체결 수는 합산하며 VWAP은 거래량 가중 방식으로 다시 계산합니다. 거래가 없어 없는 1분봉은 채우지 않고 각 5분봉의 실제 원천 행 수를 `source_minutes`에 기록합니다.
 
 마지막 수집 시점은 단순한 현재 시각이 아니라 `현재 UTC - 15분` 시점에 이미 폐장한 가장 최근 XNYS 세션입니다. 따라서 주말, 휴장, 조기폐장과 서머타임을 자동 반영하고 장중 실행 시에는 아직 끝나지 않은 당일 세션을 수집하지 않습니다. 서버에서는 미국 정규장 종료 15분 이후에 하루 한 번 실행하는 것을 권장합니다.
 
-티커 크롤링이 일시적으로 실패하면 정상적인 기존 티커 파일을 유지합니다. 수집 실패 종목이나 검사 오류가 있으면 가능한 파일의 필터와 검사는 계속 수행하지만 프로세스는 종료 코드 `1`을 반환하므로 서버 모니터링에서 실패를 감지할 수 있습니다.
+종목·형식·단계별 성공 상태는 `pipeline_state/daily_pipeline_state.json`에 매 종목 처리 직후 원자적으로 저장합니다. 같은 완료 세션을 다시 실행할 때 체크포인트와 결과 파일이 모두 있으면 완료 단계를 건너뜁니다. 실행이 중간에 종료되더라도 다음 실행은 미완료 종목과 단계부터 이어집니다. 상태 파일이 없어도 기존 결과 파일을 기준으로 증분 범위를 다시 계산할 수 있습니다.
+
+티커 크롤링이 일시적으로 실패하면 정상적인 기존 티커 파일을 유지합니다. 수집 실패 종목은 전체 1차 수집이 끝난 뒤 실패 종목만 최대 3회까지 자동 재시도합니다. 최종 실패는 `report/pipeline_failures.json`과 체크포인트에 기록합니다. 수집 실패 종목이나 검사 오류가 있으면 가능한 파일의 후속 처리는 계속 수행하지만 프로세스는 종료 코드 `1`을 반환하므로 서버 모니터링에서 실패를 감지할 수 있습니다.
 
 ## 개별 스크립트 실행 순서
 
