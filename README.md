@@ -1,4 +1,4 @@
-# S&P 500 5분봉 데이터 파이프라인
+# 미국 주식 데이터 파이프라인
 
 Wikipedia와 Alpaca에서 최근 3년의 S&P 500 관련 종목을 수집하고, 정규장 데이터 분리와 데이터 품질 검사를 수행하는 프로젝트입니다.
 
@@ -8,6 +8,7 @@ Wikipedia와 Alpaca에서 최근 3년의 S&P 500 관련 종목을 수집하고, 
 
 ```text
 script/
+├── daily_pipeline.py             # SIP 1분봉 일일 통합 파이프라인
 ├── data_collection/              # API 호출 및 크롤링
 │   ├── script.py
 │   ├── collect_sip_1min.py
@@ -58,6 +59,9 @@ script/
 │   └── sp500_tickers_3years.txt
 └── report/
     ├── data_audit_report.txt
+    ├── regular_sip_session_audit/
+    │   ├── adjusted_{format}_summary.csv
+    │   └── adjusted_{format}_missing_intervals.csv
     └── regular_session_audit/
         ├── {type}_{format}_summary.csv
         └── {type}_{format}_missing_intervals.csv
@@ -73,6 +77,7 @@ script/
 | `regular_sip_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
 | `report/data_audit_report.txt` | `data_validation/data_report.py` | Raw Parquet 전체 검사 보고서 |
 | `report/regular_session_audit/` | `data_validation/audit_regular_session.py` | 종목별 기간·커버리지와 누락 구간 CSV |
+| `report/regular_sip_session_audit/` | `daily_pipeline.py` | SIP 1분봉 기간·커버리지와 누락 구간 CSV |
 
 ## 사전 준비
 
@@ -124,7 +129,34 @@ export ALPACA_SECRET_KEY="발급받은_SECRET_KEY"
 
 또는 `.env.example`을 `.env`로 복사한 뒤 실제 키를 입력할 수 있습니다. 실제 키가 들어 있는 `.env`는 커밋하지 마세요.
 
-## 기본 실행 순서
+## SIP 1분봉 일일 통합 실행
+
+프로젝트 최상단의 `daily_pipeline.py`는 다음 작업을 순서대로 수행합니다.
+
+1. Wikipedia에서 현재 및 최근 3년 S&P 500 관련 티커 갱신
+2. Alpaca SIP Adjusted 1분봉 수집 또는 증분 갱신
+3. XNYS 캘린더로 정규장 데이터 분리
+4. 종목별 기간, 1분봉 커버리지와 누락 구간 보고서 생성
+
+사용자가 선택하는 값은 CSV 또는 Parquet 형식뿐입니다. 피드는 SIP, 봉 간격은 1분, 가격은 Adjusted, 캘린더는 XNYS로 고정됩니다.
+
+```bash
+python daily_pipeline.py
+```
+
+서버나 스케줄러에서는 형식을 명시해 입력 대기 없이 실행합니다.
+
+```bash
+python daily_pipeline.py --format parquet
+```
+
+종목 파일이 없으면 가장 최근에 완료된 거래 세션을 끝으로 최근 3년 전체를 수집합니다. 기존 파일이 있으면 마지막 타임스탬프 다음 1분부터 추가하고, 데이터는 계속 최근 3년 범위로 유지합니다.
+
+마지막 수집 시점은 단순한 현재 시각이 아니라 `현재 UTC - 15분` 시점에 이미 폐장한 가장 최근 XNYS 세션입니다. 따라서 주말, 휴장, 조기폐장과 서머타임을 자동 반영하고 장중 실행 시에는 아직 끝나지 않은 당일 세션을 수집하지 않습니다. 서버에서는 미국 정규장 종료 15분 이후에 하루 한 번 실행하는 것을 권장합니다.
+
+티커 크롤링이 일시적으로 실패하면 정상적인 기존 티커 파일을 유지합니다. 수집 실패 종목이나 검사 오류가 있으면 가능한 파일의 필터와 검사는 계속 수행하지만 프로세스는 종료 코드 `1`을 반환하므로 서버 모니터링에서 실패를 감지할 수 있습니다.
+
+## 개별 스크립트 실행 순서
 
 명령은 프로젝트 루트에서 실행하는 것을 권장합니다.
 
