@@ -21,6 +21,7 @@ script/
 │   └── README.md
 ├── data_validation/              # 데이터 검사 및 보고서 생성
 │   ├── audit_regular_session.py
+│   ├── quality_control.py
 │   ├── check_data.py
 │   ├── data_report.py
 │   └── README.md
@@ -66,6 +67,7 @@ script/
 └── report/
     ├── data_audit_report.txt
     ├── pipeline_failures.json    # 마지막 실행의 최종 실패 목록
+    ├── data_quality/             # 원본 1분봉 품질 검사와 복구 결과
     ├── regular_sip_session_audit/
     │   ├── 1min/
     │   │   ├── adjusted_{format}_summary.csv
@@ -87,8 +89,9 @@ script/
 | `regular_market_data/` | `data_filtering/filter_regular_session.py` | 휴장·조기 폐장·서머타임을 반영한 정규장 데이터 |
 | `regular_sip_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
 | `regular_sip_5min_market_data/` | `data_filtering/resample_sip_5min.py` | 정규장 SIP 1분봉에서 집계한 5분봉 |
-| `pipeline_state/daily_pipeline_state.json` | `daily_pipeline.py` | 종목별 수집·필터·5분봉 생성 체크포인트와 최근 실행 상태 |
+| `pipeline_state/daily_pipeline_state.json` | `daily_pipeline.py` | 종목별 수집·품질 검사·필터·5분봉 생성 체크포인트와 최근 실행 상태 |
 | `report/pipeline_failures.json` | `daily_pipeline.py` | 자동 재시도 후에도 실패한 종목과 단계 |
+| `report/data_quality/` | `daily_pipeline.py` | 원본 SIP 1분봉의 누락·중복·OHLCV 이상과 복구 결과 CSV |
 | `report/data_audit_report.txt` | `data_validation/data_report.py` | Raw Parquet 전체 검사 보고서 |
 | `report/regular_session_audit/` | `data_validation/audit_regular_session.py` | 종목별 기간·커버리지와 누락 구간 CSV |
 | `report/regular_sip_session_audit/` | `daily_pipeline.py` | SIP 1분봉·5분봉 기간, 커버리지와 누락 구간 CSV |
@@ -149,9 +152,10 @@ export ALPACA_SECRET_KEY="발급받은_SECRET_KEY"
 
 1. Wikipedia에서 현재 및 최근 3년 S&P 500 관련 티커 갱신
 2. Alpaca SIP Adjusted 1분봉 수집 또는 증분 갱신
-3. XNYS 캘린더로 정규장 데이터 분리
-4. 정규장 1분봉을 종목·거래일별 SIP 5분봉으로 집계
-5. 종목별 1분봉·5분봉 커버리지와 누락 구간 보고서 생성
+3. 원본 1분봉 품질 검사와 최근 누락 구간 자동 재수집
+4. XNYS 캘린더로 정규장 데이터 분리
+5. 정규장 1분봉을 종목·거래일별 SIP 5분봉으로 집계
+6. 종목별 1분봉·5분봉 커버리지와 누락 구간 보고서 생성
 
 사용자가 선택하는 값은 CSV 또는 Parquet 형식뿐입니다. 피드는 SIP, 봉 간격은 1분, 가격은 Adjusted, 캘린더는 XNYS로 고정됩니다.
 
@@ -166,6 +170,10 @@ python daily_pipeline.py --format parquet
 ```
 
 종목 파일이 없으면 가장 최근에 완료된 거래 세션을 끝으로 최근 3년 전체를 수집합니다. 기존 파일이 있으면 마지막 타임스탬프 다음 1분부터 추가하고, 데이터는 계속 최근 3년 범위로 유지합니다. 정규장 필터와 5분봉 생성도 전체 3년을 다시 계산하지 않고 마지막 저장 세션을 안전하게 한 번 재계산한 뒤 새 세션만 병합합니다.
+
+Adjusted 데이터는 매 실행마다 최근 10거래일을 다시 조회합니다. 이미 저장된 가격과 재조회 가격이 달라지면 배당·액면분할 등 수정주가 이력 변경으로 판단하여 해당 종목의 최근 3년 원본을 다시 수집하고, 변경 시작 거래일부터 정규장 1분봉과 5분봉을 다시 계산합니다.
+
+품질 단계는 전체 원본 기간의 정규장 1분 타임스탬프, 중복, OHLC 관계, 음수 거래량과 `volume=0`을 검사합니다. 최근 10거래일의 누락 구간은 Alpaca에 한 번 더 요청하고 복구된 원본은 후속 필터와 5분봉에 즉시 반영합니다. 재요청 후에도 없는 봉은 실제 무거래일 수 있으므로 임의 보간하지 않고 `report/data_quality/`의 `summary`, `missing_intervals`, `invalid_rows` CSV에 남깁니다. 구조적으로 잘못된 OHLCV 행이 있는 종목은 후속 처리에서 제외하고 파이프라인을 실패 상태로 기록합니다.
 
 5분봉은 별도 API 호출 없이 정규장 1분봉에서 생성합니다. 시가/고가/저가/종가에는 각각 첫 값/최댓값/최솟값/마지막 값을 사용하고, 거래량과 체결 수는 합산하며 VWAP은 거래량 가중 방식으로 다시 계산합니다. 거래가 없어 없는 1분봉은 채우지 않고 각 5분봉의 실제 원천 행 수를 `source_minutes`에 기록합니다.
 
