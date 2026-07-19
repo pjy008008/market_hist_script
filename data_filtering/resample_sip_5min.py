@@ -19,6 +19,8 @@ from data_filtering.filter_regular_session import (
     load_market_data,
     normalize_timestamp_index,
     save_market_data,
+    session_open_for_timestamp,
+    slice_timestamp_range,
 )
 
 
@@ -150,6 +152,58 @@ def build_resample_source(
 
 def output_file_name(input_path: Path) -> str:
     return input_path.name.replace("_1min_sip_historical", "_5min_sip_historical")
+
+
+def process_resample_file_incrementally(
+    input_path: Path,
+    output_path: Path,
+    storage_format: str,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    calendar_name: str = DEFAULT_CALENDAR,
+) -> tuple[int, int, int]:
+    """Rebuild the last output session and append newly filtered sessions."""
+    start = pd.Timestamp(start_time).tz_convert("UTC")
+    end = pd.Timestamp(end_time).tz_convert("UTC")
+    source = slice_timestamp_range(
+        load_market_data(input_path, storage_format),
+        start,
+        end,
+    )
+
+    existing = pd.DataFrame()
+    if output_path.is_file():
+        existing = slice_timestamp_range(
+            load_market_data(output_path, storage_format),
+            start,
+            end,
+        )
+
+    if existing.empty:
+        retained = existing
+        candidate = source
+    else:
+        last_output = pd.Timestamp(
+            existing.index.get_level_values("timestamp").max()
+        )
+        recompute_start = session_open_for_timestamp(last_output, calendar_name)
+        existing_timestamps = pd.DatetimeIndex(
+            existing.index.get_level_values("timestamp")
+        )
+        source_timestamps = pd.DatetimeIndex(source.index.get_level_values("timestamp"))
+        retained = existing.loc[existing_timestamps < recompute_start].copy()
+        candidate = source.loc[source_timestamps >= recompute_start].copy()
+
+    new_bars = resample_sip_five_minutes(candidate, calendar_name)
+    frames = [frame for frame in (retained, new_bars) if not frame.empty]
+    if frames:
+        combined = pd.concat(frames)
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        combined = slice_timestamp_range(combined, start, end)
+    else:
+        combined = source.iloc[0:0].copy()
+    save_market_data(combined, output_path, storage_format)
+    return len(candidate), len(new_bars), len(combined)
 
 
 def process_resample_source(

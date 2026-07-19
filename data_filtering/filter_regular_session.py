@@ -161,6 +161,89 @@ def save_market_data(
         temporary_path.unlink(missing_ok=True)
 
 
+def slice_timestamp_range(
+    dataframe: pd.DataFrame,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+) -> pd.DataFrame:
+    """Keep rows inside a half-open UTC timestamp range."""
+    if dataframe.empty:
+        return dataframe.copy()
+    timestamps = pd.DatetimeIndex(dataframe.index.get_level_values("timestamp"))
+    mask = (timestamps >= start_time) & (timestamps < end_time)
+    return dataframe.loc[mask].copy()
+
+
+def session_open_for_timestamp(
+    timestamp: pd.Timestamp,
+    calendar_name: str = DEFAULT_CALENDAR,
+) -> pd.Timestamp:
+    """Return the official session open containing a regular-session timestamp."""
+    calendar = mcal.get_calendar(calendar_name)
+    local_date = pd.Timestamp(timestamp).tz_convert(calendar.tz).date()
+    schedule = calendar.schedule(local_date, local_date, tz="UTC")
+    if schedule.empty:
+        raise ValueError(f"거래 세션을 찾을 수 없습니다: {local_date}")
+    return pd.Timestamp(schedule.iloc[0]["market_open"])
+
+
+def process_file_incrementally(
+    input_path: Path,
+    output_path: Path,
+    storage_format: str,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    calendar_name: str = DEFAULT_CALENDAR,
+) -> tuple[int, int, int]:
+    """Filter only the last output session and newly collected source rows.
+
+    The preceding output session is recalculated to make reruns and partially
+    completed files safe. Older filtered rows are retained, while rows outside
+    the rolling collection window are removed.
+    """
+    start = pd.Timestamp(start_time).tz_convert("UTC")
+    end = pd.Timestamp(end_time).tz_convert("UTC")
+    source = slice_timestamp_range(
+        load_market_data(input_path, storage_format),
+        start,
+        end,
+    )
+
+    existing = pd.DataFrame()
+    if output_path.is_file():
+        existing = slice_timestamp_range(
+            load_market_data(output_path, storage_format),
+            start,
+            end,
+        )
+
+    if existing.empty:
+        retained = existing
+        candidate = source
+    else:
+        last_output = pd.Timestamp(
+            existing.index.get_level_values("timestamp").max()
+        )
+        recompute_start = session_open_for_timestamp(last_output, calendar_name)
+        existing_timestamps = pd.DatetimeIndex(
+            existing.index.get_level_values("timestamp")
+        )
+        source_timestamps = pd.DatetimeIndex(source.index.get_level_values("timestamp"))
+        retained = existing.loc[existing_timestamps < recompute_start].copy()
+        candidate = source.loc[source_timestamps >= recompute_start].copy()
+
+    newly_filtered = filter_regular_session(candidate, calendar_name)
+    frames = [frame for frame in (retained, newly_filtered) if not frame.empty]
+    if frames:
+        combined = pd.concat(frames)
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        combined = slice_timestamp_range(combined, start, end)
+    else:
+        combined = source.iloc[0:0].copy()
+    save_market_data(combined, output_path, storage_format)
+    return len(candidate), len(newly_filtered), len(combined)
+
+
 def build_sources(
     project_root: Path,
     output_root: Path,

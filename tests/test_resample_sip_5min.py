@@ -6,6 +6,7 @@ import pandas as pd
 
 from data_filtering.resample_sip_5min import (
     ResampleSource,
+    process_resample_file_incrementally,
     process_resample_source,
     resample_sip_five_minutes,
 )
@@ -101,6 +102,52 @@ class ResampleSipFiveMinutesTests(unittest.TestCase):
             self.assertTrue(output_path.is_file())
             result = pd.read_csv(output_path)
             self.assertEqual(result.loc[0, "source_minutes"], 5)
+
+    def test_incremental_resample_rebuilds_last_session_and_appends_new_one(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_path = root / "input.csv"
+            output_path = root / "output.csv"
+            first_session = self.make_frame(
+                [
+                    "2025-02-03 14:30:00+00:00",
+                    "2025-02-03 14:31:00+00:00",
+                    "2025-02-03 14:32:00+00:00",
+                    "2025-02-03 14:33:00+00:00",
+                    "2025-02-03 14:34:00+00:00",
+                ]
+            )
+            resample_sip_five_minutes(first_session).to_csv(output_path, index=True)
+            second_session = first_session.copy()
+            second_session.index = pd.MultiIndex.from_arrays(
+                [
+                    ["AAP"] * len(second_session),
+                    pd.to_datetime(
+                        [
+                            "2025-02-04 14:30:00+00:00",
+                            "2025-02-04 14:31:00+00:00",
+                            "2025-02-04 14:32:00+00:00",
+                            "2025-02-04 14:33:00+00:00",
+                            "2025-02-04 14:34:00+00:00",
+                        ],
+                        utc=True,
+                    ),
+                ],
+                names=["symbol", "timestamp"],
+            )
+            pd.concat([first_session, second_session]).to_csv(input_path, index=True)
+
+            totals = process_resample_file_incrementally(
+                input_path,
+                output_path,
+                "csv",
+                pd.Timestamp("2025-02-01 00:00:00+00:00"),
+                pd.Timestamp("2025-02-05 00:00:00+00:00"),
+            )
+
+            self.assertEqual(totals, (10, 2, 2))
+            result = pd.read_csv(output_path)
+            self.assertEqual(len(result), 2)
 
 
 if __name__ == "__main__":

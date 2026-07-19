@@ -13,6 +13,7 @@ from data_filtering.filter_regular_session import (
     filter_regular_session,
     load_market_data,
     parse_timestamp_values,
+    process_file_incrementally,
     process_source,
     parse_args,
 )
@@ -201,6 +202,52 @@ class InteractiveSelectionTests(unittest.TestCase):
                     ],
                     utc=True,
                 ).tolist(),
+            )
+
+    def test_incremental_filter_recalculates_last_session_and_adds_new_session(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_path = root / "input.csv"
+            output_path = root / "output.csv"
+            existing = FilterRegularSessionTests.make_frame(
+                [
+                    "2025-02-03 14:30:00+00:00",
+                    "2025-02-03 14:31:00+00:00",
+                ]
+            )
+            existing.to_csv(output_path, index=True)
+            source = FilterRegularSessionTests.make_frame(
+                [
+                    "2025-02-03 14:30:00+00:00",
+                    "2025-02-03 14:31:00+00:00",
+                    "2025-02-04 14:29:00+00:00",
+                    "2025-02-04 14:30:00+00:00",
+                ]
+            )
+            source.to_csv(input_path, index=True)
+
+            totals = process_file_incrementally(
+                input_path,
+                output_path,
+                "csv",
+                pd.Timestamp("2025-02-01 00:00:00+00:00"),
+                pd.Timestamp("2025-02-05 00:00:00+00:00"),
+            )
+
+            self.assertEqual(totals, (4, 3, 3))
+            result = load_market_data(output_path, "csv")
+            self.assertEqual(
+                list(result.index.get_level_values("timestamp")),
+                list(
+                    pd.to_datetime(
+                        [
+                            "2025-02-03 14:30:00+00:00",
+                            "2025-02-03 14:31:00+00:00",
+                            "2025-02-04 14:30:00+00:00",
+                        ],
+                        utc=True,
+                    )
+                ),
             )
 
 
