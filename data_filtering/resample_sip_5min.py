@@ -161,6 +161,7 @@ def process_resample_file_incrementally(
     start_time: pd.Timestamp,
     end_time: pd.Timestamp,
     calendar_name: str = DEFAULT_CALENDAR,
+    recompute_from: pd.Timestamp | None = None,
 ) -> tuple[int, int, int]:
     """Rebuild the last output session and append newly filtered sessions."""
     start = pd.Timestamp(start_time).tz_convert("UTC")
@@ -187,6 +188,11 @@ def process_resample_file_incrementally(
             existing.index.get_level_values("timestamp").max()
         )
         recompute_start = session_open_for_timestamp(last_output, calendar_name)
+        if recompute_from is not None:
+            requested_start = session_open_for_timestamp(
+                pd.Timestamp(recompute_from), calendar_name
+            )
+            recompute_start = min(recompute_start, requested_start)
         existing_timestamps = pd.DatetimeIndex(
             existing.index.get_level_values("timestamp")
         )

@@ -16,12 +16,13 @@ from alpaca.data.historical import StockHistoricalDataClient
 from dotenv import load_dotenv
 
 from data_collection.collect_sip_1min import (
+    CollectionResult,
     DEFAULT_CHUNK_DAYS,
     DEFAULT_REQUEST_DELAY_SECONDS,
     END_DELAY_MINUTES,
     YEARS_TO_COLLECT,
-    process_symbol,
     storage_path,
+    update_symbol_data,
 )
 from data_collection.get_ticker import get_historical_sp500_tickers
 from data_filtering.filter_regular_session import (
@@ -36,6 +37,7 @@ from data_filtering.resample_sip_5min import (
     process_resample_file_incrementally,
 )
 from data_validation.audit_regular_session import audit_source, save_report
+from data_validation.quality_control import QualityResult, repair_symbol_file
 from pipeline_state import PipelineStateStore
 
 
@@ -50,8 +52,10 @@ COLLECTION_ROOT = PROJECT_ROOT / "sip_market_data"
 FILTERED_ROOT = PROJECT_ROOT / "regular_sip_market_data"
 REPORT_ROOT = PROJECT_ROOT / "report" / "regular_sip_session_audit"
 FAILURE_REPORT_PATH = PROJECT_ROOT / "report" / "pipeline_failures.json"
+QUALITY_REPORT_ROOT = PROJECT_ROOT / "report" / "data_quality"
 MAX_SYMBOL_ATTEMPTS = 3
 SYMBOL_RETRY_DELAY_SECONDS = 5
+ADJUSTED_REFRESH_SESSIONS = 10
 
 
 def choose_storage_format() -> str:
@@ -114,6 +118,30 @@ def completed_collection_window(
     return start_time, end_time
 
 
+def adjusted_refresh_start(
+    end_time: datetime,
+    sessions: int = ADJUSTED_REFRESH_SESSIONS,
+    calendar_name: str = DEFAULT_CALENDAR,
+) -> datetime:
+    """Return the open of the recent sessions re-fetched for adjustment changes."""
+    if sessions <= 0:
+        raise ValueError("sessions must be positive")
+    calendar = mcal.get_calendar(calendar_name)
+    end = pd.Timestamp(end_time).tz_convert("UTC")
+    local_end_date = end.tz_convert(calendar.tz).date()
+    schedule = calendar.schedule(
+        start_date=local_end_date - timedelta(days=max(45, sessions * 3)),
+        end_date=local_end_date,
+        tz="UTC",
+    )
+    completed = schedule[schedule["market_close"] <= end]
+    if len(completed) < sessions:
+        raise RuntimeError(
+            f"최근 {sessions}개 완료 거래 세션을 찾지 못했습니다."
+        )
+    return pd.Timestamp(completed.iloc[-sessions]["market_open"]).to_pydatetime()
+
+
 def read_ticker_file(file_path: Path = TICKER_FILE) -> list[str]:
     if not file_path.is_file():
         return []
@@ -168,10 +196,12 @@ def run_collection(
     end_time: datetime,
     state: PipelineStateStore,
     target_session_utc: str,
+    refresh_start: datetime,
     retry_delay: float = SYMBOL_RETRY_DELAY_SECONDS,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, pd.Timestamp]]:
     pending = list(symbols)
     last_attempts: dict[str, int] = {}
+    changed_from_by_symbol: dict[str, pd.Timestamp] = {}
     for attempt in range(1, MAX_SYMBOL_ATTEMPTS + 1):
         if not pending:
             break
@@ -200,8 +230,9 @@ def run_collection(
 
             print(f"\n[{index}/{len(pending)}] {symbol} 수집 또는 갱신 (시도 {attempt})")
             last_attempts[symbol] = attempt
+            succeeded = False
             try:
-                succeeded = process_symbol(
+                result = update_symbol_data(
                     client,
                     symbol,
                     DATA_TYPE,
@@ -211,9 +242,14 @@ def run_collection(
                     end_time,
                     DEFAULT_CHUNK_DAYS,
                     DEFAULT_REQUEST_DELAY_SECONDS,
+                    refresh_start,
                 )
+                succeeded = bool(result)
                 error = "" if succeeded else "종목 수집 처리 실패"
+                if result.changed_from_utc is not None:
+                    changed_from_by_symbol[symbol] = result.changed_from_utc
             except Exception as exc:
+                result = CollectionResult(False)
                 succeeded = False
                 error = str(exc)
 
@@ -225,12 +261,21 @@ def run_collection(
                 target_session_utc,
                 attempt,
                 error,
+                details={
+                    "changed_from_utc": (
+                        result.changed_from_utc.isoformat()
+                        if result.changed_from_utc is not None
+                        else ""
+                    ),
+                    "adjustment_revision": result.adjustment_revision,
+                    "added_rows": result.added_rows,
+                },
             )
             if not succeeded:
                 failed_this_round.append(symbol)
         pending = failed_this_round
 
-    return [
+    failures = [
         {
             "stage": "collection",
             "symbol": symbol,
@@ -239,6 +284,125 @@ def run_collection(
         }
         for symbol in pending
     ]
+    return failures, changed_from_by_symbol
+
+
+def run_quality_control(
+    client: StockHistoricalDataClient,
+    storage_format: str,
+    symbols: list[str],
+    state: PipelineStateStore,
+    target_session_utc: str,
+    start_time: datetime,
+    end_time: datetime,
+    repair_start: datetime,
+    changed_from_by_symbol: dict[str, pd.Timestamp],
+) -> tuple[list[str], list[dict[str, object]], dict[str, pd.Timestamp], int]:
+    """Audit source bars, retry recent gaps, and block structurally invalid symbols."""
+    validated_symbols: list[str] = []
+    failures: list[dict[str, object]] = []
+    downstream_changes = dict(changed_from_by_symbol)
+    summaries: list[dict[str, object]] = []
+    missing_intervals: list[dict[str, object]] = []
+    invalid_rows: list[dict[str, object]] = []
+    repaired_rows = 0
+
+    for index, symbol in enumerate(symbols, 1):
+        file_path = storage_path(
+            symbol, DATA_TYPE, storage_format, COLLECTION_ROOT
+        )
+        force_check = symbol in changed_from_by_symbol
+        if not force_check and state.is_complete(
+            storage_format,
+            symbol,
+            "quality",
+            target_session_utc,
+            file_path,
+        ):
+            print(f"[{index}/{len(symbols)}] {symbol} 품질 검사 체크포인트 완료 - 건너뜀")
+            validated_symbols.append(symbol)
+            continue
+
+        result: QualityResult = repair_symbol_file(
+            client,
+            symbol,
+            file_path,
+            storage_format,
+            DATA_TYPE,
+            start_time,
+            end_time,
+            repair_start,
+            DEFAULT_CHUNK_DAYS,
+            DEFAULT_REQUEST_DELAY_SECONDS,
+            DEFAULT_CALENDAR,
+        )
+        if not result.success:
+            error = result.error or "quality control failed"
+            state.mark_stage(
+                storage_format,
+                symbol,
+                "quality",
+                "failed",
+                target_session_utc,
+                1,
+                error,
+            )
+            failures.append(
+                {"stage": "quality", "symbol": symbol, "attempts": 1, "error": error}
+            )
+            summaries.append({"symbol": symbol, "status": f"error: {error}"})
+            continue
+
+        summaries.append(result.summary)
+        missing_intervals.extend(result.missing_intervals)
+        invalid_rows.extend(result.invalid_rows)
+        repaired_rows += result.repaired_rows
+        if result.changed_from_utc is not None:
+            previous = downstream_changes.get(symbol)
+            downstream_changes[symbol] = (
+                min(previous, result.changed_from_utc)
+                if previous is not None
+                else result.changed_from_utc
+            )
+
+        invalid_count = len(result.invalid_rows)
+        status = "failed" if invalid_count else "success"
+        error = f"invalid OHLCV rows: {invalid_count}" if invalid_count else ""
+        state.mark_stage(
+            storage_format,
+            symbol,
+            "quality",
+            status,
+            target_session_utc,
+            1,
+            error,
+            details={
+                "missing_bars": int(result.summary.get("missing_bars", 0)),
+                "repair_windows": int(result.summary.get("repair_windows", 0)),
+                "repaired_rows": result.repaired_rows,
+            },
+        )
+        if invalid_count:
+            failures.append(
+                {"stage": "quality", "symbol": symbol, "attempts": 1, "error": error}
+            )
+        else:
+            validated_symbols.append(symbol)
+
+    prefix = f"{DATA_TYPE}_{storage_format}"
+    save_report(
+        pd.DataFrame(summaries),
+        QUALITY_REPORT_ROOT / f"{prefix}_summary.csv",
+    )
+    save_report(
+        pd.DataFrame(missing_intervals),
+        QUALITY_REPORT_ROOT / f"{prefix}_missing_intervals.csv",
+    )
+    save_report(
+        pd.DataFrame(invalid_rows),
+        QUALITY_REPORT_ROOT / f"{prefix}_invalid_rows.csv",
+    )
+    return validated_symbols, failures, downstream_changes, repaired_rows
 
 
 def run_filter(
@@ -248,7 +412,9 @@ def run_filter(
     target_session_utc: str,
     start_time: datetime,
     end_time: datetime,
+    changed_from_by_symbol: dict[str, pd.Timestamp] | None = None,
 ) -> tuple[int, int, int, list[dict[str, object]]]:
+    changed_from_by_symbol = changed_from_by_symbol or {}
     source = build_sources(
         PROJECT_ROOT,
         FILTERED_ROOT,
@@ -265,7 +431,7 @@ def run_filter(
             symbol, DATA_TYPE, storage_format, COLLECTION_ROOT
         )
         output_path = source.destination_dir / input_path.name
-        if state.is_complete(
+        if symbol not in changed_from_by_symbol and state.is_complete(
             storage_format,
             symbol,
             "filter",
@@ -283,6 +449,7 @@ def run_filter(
                 pd.Timestamp(start_time),
                 pd.Timestamp(end_time),
                 DEFAULT_CALENDAR,
+                changed_from_by_symbol.get(symbol),
             )
             state.mark_stage(
                 storage_format,
@@ -312,7 +479,9 @@ def run_resample(
     target_session_utc: str,
     start_time: datetime,
     end_time: datetime,
+    changed_from_by_symbol: dict[str, pd.Timestamp] | None = None,
 ) -> tuple[int, int, int, list[dict[str, object]]]:
+    changed_from_by_symbol = changed_from_by_symbol or {}
     source = build_resample_source(storage_format)
     completed_files = 0
     candidate_rows = 0
@@ -322,7 +491,7 @@ def run_resample(
         input_name = f"{symbol.replace('/', '-')}_1min_sip_historical.{storage_format}"
         input_path = source.source_dir / input_name
         output_path = source.destination_dir / output_file_name(input_path)
-        if state.is_complete(
+        if symbol not in changed_from_by_symbol and state.is_complete(
             storage_format,
             symbol,
             "resample_5min",
@@ -340,6 +509,7 @@ def run_resample(
                 pd.Timestamp(start_time),
                 pd.Timestamp(end_time),
                 DEFAULT_CALENDAR,
+                changed_from_by_symbol.get(symbol),
             )
             state.mark_stage(
                 storage_format,
@@ -440,6 +610,7 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
 
     try:
         start_time, end_time = completed_collection_window(now)
+        refresh_start = adjusted_refresh_start(end_time)
         print("Wikipedia에서 최근 3년 S&P 500 관련 티커를 갱신합니다...")
         symbols = load_pipeline_symbols()
         state = PipelineStateStore()
@@ -461,8 +632,8 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
     print("=" * 72)
 
     client = StockHistoricalDataClient(api_key, secret_key)
-    print("\n[1/4] SIP Adjusted 1분봉 수집·증분 갱신")
-    failures = run_collection(
+    print("\n[1/5] SIP Adjusted 1분봉 수집·수정주가 갱신")
+    failures, changed_from_by_symbol = run_collection(
         client,
         symbols,
         storage_format,
@@ -470,6 +641,7 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         end_time,
         state,
         target_session_utc,
+        refresh_start,
     )
     failed_collection_symbols = {
         str(failure["symbol"]) for failure in failures
@@ -478,27 +650,47 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         symbol for symbol in symbols if symbol not in failed_collection_symbols
     ]
 
-    print("\n[2/4] XNYS 정규장 1분봉 필터링")
+    print("\n[2/5] 데이터 품질 검사 및 최근 누락 구간 복구")
+    (
+        quality_symbols,
+        quality_failures,
+        changed_from_by_symbol,
+        repaired_rows,
+    ) = run_quality_control(
+        client,
+        storage_format,
+        collected_symbols,
+        state,
+        target_session_utc,
+        start_time,
+        end_time,
+        refresh_start,
+        changed_from_by_symbol,
+    )
+    failures.extend(quality_failures)
+
+    print("\n[3/5] XNYS 정규장 1분봉 필터링")
     try:
         processed_files, total_rows, kept_rows, filter_failures = run_filter(
             storage_format,
-            collected_symbols,
+            quality_symbols,
             state,
             target_session_utc,
             start_time,
             end_time,
+            changed_from_by_symbol,
         )
         failures.extend(filter_failures)
         if processed_files == 0:
             raise RuntimeError("필터링할 수집 파일이 없습니다.")
 
-        print("\n[3/4] 정규장 1분봉에서 SIP 5분봉 생성")
+        print("\n[4/5] 정규장 1분봉에서 SIP 5분봉 생성")
         failed_filter_symbols = {
             str(failure["symbol"]) for failure in filter_failures
         }
         filtered_symbols = [
             symbol
-            for symbol in collected_symbols
+            for symbol in quality_symbols
             if symbol not in failed_filter_symbols
         ]
         (
@@ -513,12 +705,13 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
             target_session_utc,
             start_time,
             end_time,
+            changed_from_by_symbol,
         )
         failures.extend(resample_failures)
         if resampled_files == 0:
             raise RuntimeError("5분봉으로 변환할 정규장 1분봉 파일이 없습니다.")
 
-        print("\n[4/4] SIP 1분봉·5분봉 기간 및 누락 구간 검사")
+        print("\n[5/5] SIP 1분봉·5분봉 기간 및 누락 구간 검사")
         audited_files, audit_errors = run_validation(storage_format)
     except (OSError, RuntimeError, ValueError, ImportError) as exc:
         failures.append(
@@ -549,6 +742,10 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         f"5분봉 {resampled_files}개 파일 "
         f"({one_minute_rows:,} -> {five_minute_rows:,}행), "
         f"검사 {audited_files}개 파일"
+    )
+    print(
+        f"품질 검사 통과 {len(quality_symbols)}/{len(collected_symbols)}개, "
+        f"최근 누락 복구 {repaired_rows:,}행"
     )
     if failures:
         print(f"최종 실패 {len(failures)}건: {FAILURE_REPORT_PATH}")

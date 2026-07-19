@@ -139,6 +139,11 @@ def filter_regular_session(
         & bar_times.ge(market_opens)
         & bar_times.lt(market_closes)
     )
+    if "volume" in normalized.columns:
+        volume = pd.to_numeric(normalized["volume"], errors="coerce").reset_index(
+            drop=True
+        )
+        regular_mask &= volume.gt(0)
     return normalized.loc[regular_mask.to_numpy()].copy()
 
 
@@ -194,6 +199,7 @@ def process_file_incrementally(
     start_time: pd.Timestamp,
     end_time: pd.Timestamp,
     calendar_name: str = DEFAULT_CALENDAR,
+    recompute_from: pd.Timestamp | None = None,
 ) -> tuple[int, int, int]:
     """Filter only the last output session and newly collected source rows.
 
@@ -225,6 +231,11 @@ def process_file_incrementally(
             existing.index.get_level_values("timestamp").max()
         )
         recompute_start = session_open_for_timestamp(last_output, calendar_name)
+        if recompute_from is not None:
+            requested_start = session_open_for_timestamp(
+                pd.Timestamp(recompute_from), calendar_name
+            )
+            recompute_start = min(recompute_start, requested_start)
         existing_timestamps = pd.DatetimeIndex(
             existing.index.get_level_values("timestamp")
         )

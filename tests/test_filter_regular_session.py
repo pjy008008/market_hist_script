@@ -80,6 +80,22 @@ class FilterRegularSessionTests(unittest.TestCase):
             [pd.Timestamp(timestamps[0])],
         )
 
+    def test_zero_volume_regular_session_bar_is_excluded(self):
+        frame = self.make_frame(
+            [
+                "2025-02-03 14:30:00+00:00",
+                "2025-02-03 14:31:00+00:00",
+            ]
+        )
+        frame["volume"] = [0, 100]
+
+        filtered = filter_regular_session(frame)
+
+        self.assertEqual(
+            list(filtered.index.get_level_values("timestamp")),
+            [pd.Timestamp("2025-02-03 14:31:00+00:00")],
+        )
+
     def test_sample_sip_epoch_milliseconds_are_parsed_and_filtered(self):
         timestamps = [
             1689773340000,  # 2023-07-19 09:29 America/New_York

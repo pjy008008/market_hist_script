@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
+from data_collection.collect_sip_1min import CollectionResult
 from daily_pipeline import (
     choose_storage_format,
     completed_collection_window,
@@ -83,6 +84,8 @@ class DailyPipelineTests(unittest.TestCase):
             datetime(2022, 7, 3, 17, 0, tzinfo=timezone.utc),
             datetime(2025, 7, 3, 17, 0, tzinfo=timezone.utc),
         )
+        refresh_start = datetime(2025, 6, 20, 13, 30, tzinfo=timezone.utc)
+        changes = {"AAPL": pd.Timestamp("2025-07-03 13:30:00+00:00")}
         with (
             patch.dict(
                 os.environ,
@@ -90,10 +93,17 @@ class DailyPipelineTests(unittest.TestCase):
             ),
             patch("daily_pipeline.load_dotenv"),
             patch("daily_pipeline.completed_collection_window", return_value=window),
+            patch("daily_pipeline.adjusted_refresh_start", return_value=refresh_start),
             patch("daily_pipeline.load_pipeline_symbols", return_value=["AAPL"]),
             patch("daily_pipeline.PipelineStateStore") as mock_state_class,
             patch("daily_pipeline.StockHistoricalDataClient") as mock_client,
-            patch("daily_pipeline.run_collection", return_value=[]) as mock_collect,
+            patch(
+                "daily_pipeline.run_collection", return_value=([], changes)
+            ) as mock_collect,
+            patch(
+                "daily_pipeline.run_quality_control",
+                return_value=(["AAPL"], [], changes, 0),
+            ) as mock_quality,
             patch(
                 "daily_pipeline.run_filter",
                 return_value=(1, 100, 80, []),
@@ -117,6 +127,18 @@ class DailyPipelineTests(unittest.TestCase):
             window[1],
             state,
             pd.Timestamp(window[1]).isoformat(),
+            refresh_start,
+        )
+        mock_quality.assert_called_once_with(
+            mock_client.return_value,
+            "parquet",
+            ["AAPL"],
+            state,
+            pd.Timestamp(window[1]).isoformat(),
+            window[0],
+            window[1],
+            refresh_start,
+            changes,
         )
         mock_filter.assert_called_once_with(
             "parquet",
@@ -125,6 +147,7 @@ class DailyPipelineTests(unittest.TestCase):
             pd.Timestamp(window[1]).isoformat(),
             window[0],
             window[1],
+            changes,
         )
         mock_resample.assert_called_once_with(
             "parquet",
@@ -133,6 +156,7 @@ class DailyPipelineTests(unittest.TestCase):
             pd.Timestamp(window[1]).isoformat(),
             window[0],
             window[1],
+            changes,
         )
         mock_audit.assert_called_once_with("parquet")
         mock_failure_report.assert_called_once_with(
@@ -140,11 +164,14 @@ class DailyPipelineTests(unittest.TestCase):
         )
         state.finish_run.assert_called_once_with("success", [])
 
-    @patch("daily_pipeline.process_symbol", side_effect=[False, True])
+    @patch(
+        "daily_pipeline.update_symbol_data",
+        side_effect=[CollectionResult(False), CollectionResult(True)],
+    )
     def test_collection_retries_only_failed_symbol(self, mock_process):
         with tempfile.TemporaryDirectory() as temporary_directory:
             state = PipelineStateStore(Path(temporary_directory) / "state.json")
-            failures = run_collection(
+            failures, changes = run_collection(
                 Mock(),
                 ["AAPL"],
                 "csv",
@@ -152,10 +179,12 @@ class DailyPipelineTests(unittest.TestCase):
                 datetime(2025, 1, 1, tzinfo=timezone.utc),
                 state,
                 "2025-01-01T00:00:00+00:00",
+                datetime(2024, 12, 15, tzinfo=timezone.utc),
                 retry_delay=0,
             )
 
             self.assertEqual(failures, [])
+            self.assertEqual(changes, {})
             self.assertEqual(mock_process.call_count, 2)
             checkpoint = state.data["checkpoints"]["csv"]["AAPL"]["collection"]
             self.assertEqual(checkpoint["status"], "success")
