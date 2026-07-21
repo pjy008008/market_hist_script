@@ -30,7 +30,8 @@ from data_filtering.filter_regular_session import (
     process_file_incrementally,
 )
 from data_filtering.resample_sip_5min import (
-    DESTINATION_ROOT as RESAMPLED_ROOT,
+    BAR_INTERVALS,
+    DESTINATION_ROOTS as RESAMPLED_ROOTS,
     build_resample_source,
     output_file_name,
     process_resample_file_incrementally,
@@ -49,7 +50,6 @@ DATA_TYPES = ("adjusted", "raw")
 DEFAULT_DATA_TYPE = "adjusted"
 DATASET = "sip"
 ONE_MINUTE_FREQUENCY = pd.Timedelta(minutes=1)
-FIVE_MINUTE_FREQUENCY = pd.Timedelta(minutes=5)
 MIN_EXPECTED_TICKERS = 400
 TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
 COLLECTION_ROOT = PROJECT_ROOT / "sip_market_data"
@@ -572,30 +572,40 @@ def run_resample(
     end_time: datetime,
     changed_from_by_symbol: dict[str, pd.Timestamp] | None = None,
     data_type: str = DEFAULT_DATA_TYPE,
+    bar_interval: str = "5min",
 ) -> tuple[int, int, int, list[dict[str, object]]]:
+    if bar_interval not in BAR_INTERVALS:
+        raise ValueError(f"지원하지 않는 봉 간격입니다: {bar_interval}")
     changed_from_by_symbol = changed_from_by_symbol or {}
     source = build_resample_source(
         storage_format,
         source_root=FILTERED_ROOT,
-        destination_root=RESAMPLED_ROOT,
+        destination_root=RESAMPLED_ROOTS[bar_interval],
         data_type=data_type,
     )
     completed_files = 0
     candidate_rows = 0
-    five_minute_rows = 0
+    output_rows = 0
     failures: list[dict[str, object]] = []
     for index, symbol in enumerate(symbols, 1):
         input_name = f"{symbol.replace('/', '-')}_1min_sip_historical.{storage_format}"
         input_path = source.source_dir / input_name
-        output_path = source.destination_dir / output_file_name(input_path)
+        output_path = source.destination_dir / output_file_name(
+            input_path,
+            bar_interval,
+        )
+        checkpoint_stage = f"resample_{bar_interval}"
         if symbol not in changed_from_by_symbol and state.is_complete(
             storage_format,
             symbol,
-            stage_name("resample_5min", data_type),
+            stage_name(checkpoint_stage, data_type),
             target_session_utc,
             output_path,
         ):
-            print(f"[{index}/{len(symbols)}] {symbol} 5분봉 체크포인트 완료 - 건너뜀")
+            print(
+                f"[{index}/{len(symbols)}] {symbol} "
+                f"{bar_interval}봉 체크포인트 완료 - 건너뜀"
+            )
             completed_files += 1
             continue
         try:
@@ -607,11 +617,12 @@ def run_resample(
                 pd.Timestamp(end_time),
                 DEFAULT_CALENDAR,
                 changed_from_by_symbol.get(symbol),
+                bar_interval,
             )
             state.mark_stage(
                 storage_format,
                 symbol,
-                stage_name("resample_5min", data_type),
+                stage_name(checkpoint_stage, data_type),
                 "success",
                 target_session_utc,
                 1,
@@ -619,13 +630,16 @@ def run_resample(
             )
             completed_files += 1
             candidate_rows += processed
-            five_minute_rows += created
-            print(f"[{index}/{len(symbols)}] {symbol}: 증분 1분봉 {processed:,} -> 5분봉 {created:,}행")
+            output_rows += created
+            print(
+                f"[{index}/{len(symbols)}] {symbol}: 증분 1분봉 "
+                f"{processed:,} -> {bar_interval}봉 {created:,}행"
+            )
         except (OSError, ValueError, ImportError) as exc:
             state.mark_stage(
                 storage_format,
                 symbol,
-                stage_name("resample_5min", data_type),
+                stage_name(checkpoint_stage, data_type),
                 "failed",
                 target_session_utc,
                 1,
@@ -633,14 +647,14 @@ def run_resample(
             )
             failures.append(
                 {
-                    "stage": "resample_5min",
+                    "stage": checkpoint_stage,
                     "data_type": data_type,
                     "symbol": symbol,
                     "attempts": 1,
                     "error": str(exc),
                 }
             )
-    return completed_files, candidate_rows, five_minute_rows, failures
+    return completed_files, candidate_rows, output_rows, failures
 
 
 def run_validation(
@@ -660,10 +674,13 @@ def run_validation(
         )
     total_files = 0
     total_errors = 0
-    sources = (
+    sources = [
         ("1min", FILTERED_ROOT, ONE_MINUTE_FREQUENCY),
-        ("5min", RESAMPLED_ROOT, FIVE_MINUTE_FREQUENCY),
-    )
+        *[
+            (label, RESAMPLED_ROOTS[label], frequency)
+            for label, frequency in BAR_INTERVALS.items()
+        ],
+    ]
     for label, source_root, bar_frequency in sources:
         source_dir = source_root / data_type / storage_format
         summary, intervals = audit_source(
@@ -800,7 +817,7 @@ def run_pipeline(
     collected_by_type: dict[str, list[str]] = {}
     quality_by_type: dict[str, list[str]] = {}
     filtered_by_type: dict[str, list[str]] = {}
-    metrics_by_type: dict[str, dict[str, int]] = {
+    metrics_by_type: dict[str, dict[str, object]] = {
         data_type: {
             "collection_success_symbols": 0,
             "quality_success_symbols": 0,
@@ -813,6 +830,10 @@ def run_pipeline(
             "five_minute_rows": 0,
             "audited_files": 0,
             "audit_errors": 0,
+            "bars_by_interval": {
+                interval: {"files": 0, "source_rows": 0, "output_rows": 0}
+                for interval in BAR_INTERVALS
+            },
         }
         for data_type in DATA_TYPES
     }
@@ -915,43 +936,55 @@ def run_pipeline(
                 }
             )
 
-    print("\n[4/5] Adjusted·Raw 정규장 1분봉에서 SIP 5분봉 생성")
+    print("\n[4/5] Adjusted·Raw 정규장 1분봉에서 다중 주기 봉 생성")
     for data_type in DATA_TYPES:
-        print(f"\n--- {data_type.upper()} 5분봉 생성 ---")
-        try:
-            resampled, source_rows, output_rows, resample_failures = run_resample(
-                storage_format,
-                filtered_by_type[data_type],
-                state,
-                target_session_utc,
-                start_time,
-                end_time,
-                changed_by_type[data_type],
-                data_type=data_type,
-            )
-            failures.extend(resample_failures)
-            if resampled == 0:
-                raise RuntimeError("5분봉으로 변환할 정규장 1분봉 파일이 없습니다.")
-            metrics_by_type[data_type]["resampled_files"] = resampled
-            metrics_by_type[data_type]["resampled_source_rows"] = source_rows
-            metrics_by_type[data_type]["five_minute_rows"] = output_rows
-        except (OSError, RuntimeError, ValueError, ImportError) as exc:
-            failures.append(
-                {
-                    "stage": "resample_5min",
-                    "data_type": data_type,
-                    "symbol": "*",
-                    "attempts": 1,
-                    "error": str(exc),
+        print(f"\n--- {data_type.upper()} 다중 주기 봉 생성 ---")
+        for bar_interval in BAR_INTERVALS:
+            print(f"\n[{data_type.upper()}] {bar_interval}봉")
+            try:
+                resampled, source_rows, output_rows, resample_failures = run_resample(
+                    storage_format,
+                    filtered_by_type[data_type],
+                    state,
+                    target_session_utc,
+                    start_time,
+                    end_time,
+                    changed_by_type[data_type],
+                    data_type=data_type,
+                    bar_interval=bar_interval,
+                )
+                failures.extend(resample_failures)
+                if resampled == 0:
+                    raise RuntimeError(
+                        f"{bar_interval}봉으로 변환할 정규장 1분봉 파일이 없습니다."
+                    )
+                interval_metrics = metrics_by_type[data_type]["bars_by_interval"]
+                interval_metrics[bar_interval] = {
+                    "files": resampled,
+                    "source_rows": source_rows,
+                    "output_rows": output_rows,
                 }
-            )
+                if bar_interval == "5min":
+                    metrics_by_type[data_type]["resampled_files"] = resampled
+                    metrics_by_type[data_type]["resampled_source_rows"] = source_rows
+                    metrics_by_type[data_type]["five_minute_rows"] = output_rows
+            except (OSError, RuntimeError, ValueError, ImportError) as exc:
+                failures.append(
+                    {
+                        "stage": f"resample_{bar_interval}",
+                        "data_type": data_type,
+                        "symbol": "*",
+                        "attempts": 1,
+                        "error": str(exc),
+                    }
+                )
 
     print(
         "\n[5/5] "
         + (
-            "Adjusted·Raw SIP 1분봉·5분봉 기간 및 누락 구간 상세 검사"
+            "Adjusted·Raw SIP 전체 주기 기간 및 누락 구간 상세 검사"
             if deep_quality
-            else "Adjusted·Raw SIP 1분봉·5분봉 기간·커버리지 요약 검사"
+            else "Adjusted·Raw SIP 전체 주기 기간·커버리지 요약 검사"
         )
     )
     for data_type in DATA_TYPES:
@@ -986,9 +1019,32 @@ def run_pipeline(
                 }
             )
 
+    numeric_metric_keys = (
+        "collection_success_symbols",
+        "quality_success_symbols",
+        "repaired_rows",
+        "filtered_files",
+        "filtered_source_rows",
+        "regular_session_rows",
+        "resampled_files",
+        "resampled_source_rows",
+        "five_minute_rows",
+        "audited_files",
+        "audit_errors",
+    )
     totals = {
-        key: sum(values[key] for values in metrics_by_type.values())
-        for key in next(iter(metrics_by_type.values()))
+        key: sum(int(values[key]) for values in metrics_by_type.values())
+        for key in numeric_metric_keys
+    }
+    bar_totals = {
+        interval: {
+            metric: sum(
+                int(values["bars_by_interval"][interval][metric])
+                for values in metrics_by_type.values()
+            )
+            for metric in ("files", "source_rows", "output_rows")
+        }
+        for interval in BAR_INTERVALS
     }
     final_status = "failed" if failures else "success"
     failure_report_path = save_failure_report(
@@ -1009,6 +1065,7 @@ def run_pipeline(
             "data_types": list(DATA_TYPES),
             "symbols_total": len(symbols),
             **totals,
+            "bars_by_interval": bar_totals,
             "by_data_type": metrics_by_type,
         },
     )
@@ -1022,11 +1079,15 @@ def run_pipeline(
             if deep_quality
             else "누락 재요청 생략"
         )
+        interval_text = ", ".join(
+            f"{interval} {metrics['bars_by_interval'][interval]['files']}개"
+            for interval in BAR_INTERVALS
+        )
         print(
             f"{data_type.upper()}: 수집 {metrics['collection_success_symbols']}/{len(symbols)}개, "
             f"품질 {metrics['quality_success_symbols']}개, "
             f"1분봉 필터 {metrics['filtered_files']}개 파일, "
-            f"5분봉 {metrics['resampled_files']}개 파일, "
+            f"생성 파일 ({interval_text}), "
             f"검사 {metrics['audited_files']}개 파일, {quality_result_text}"
         )
     if failures:
@@ -1041,8 +1102,8 @@ def run_pipeline(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "SIP Adjusted·Raw 1분봉을 갱신하고 정규장 필터링, 5분봉 생성과 "
-            "데이터 검사를 수행합니다."
+            "SIP Adjusted·Raw 1분봉을 갱신하고 정규장 필터링, "
+            "다중 주기 봉 생성과 데이터 검사를 수행합니다."
         )
     )
     parser.add_argument(

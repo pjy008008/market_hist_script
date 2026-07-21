@@ -217,6 +217,7 @@ class DailyPipelineTests(unittest.TestCase):
             ]
         )
         self.assertEqual(mock_filter.call_count, 2)
+        intervals = ("5min", "15min", "1hour", "4hour", "1day")
         mock_resample.assert_has_calls(
             [
                 call(
@@ -227,21 +228,14 @@ class DailyPipelineTests(unittest.TestCase):
                     window[0],
                     window[1],
                     changes,
-                    data_type="adjusted",
-                ),
-                call(
-                    "parquet",
-                    ["AAPL"],
-                    state,
-                    pd.Timestamp(window[1]).isoformat(),
-                    window[0],
-                    window[1],
-                    changes,
-                    data_type="raw",
-                ),
+                    data_type=data_type,
+                    bar_interval=interval,
+                )
+                for data_type in ("adjusted", "raw")
+                for interval in intervals
             ]
         )
-        self.assertEqual(mock_resample.call_count, 2)
+        self.assertEqual(mock_resample.call_count, 10)
         mock_audit.assert_has_calls(
             [
                 call(
@@ -326,7 +320,10 @@ class DailyPipelineTests(unittest.TestCase):
             root = Path(temporary_directory)
             collection_root = root / "sip_market_data"
             filtered_root = root / "regular_sip_1min_market_data"
-            resampled_root = root / "regular_sip_5min_market_data"
+            resampled_roots = {
+                interval: root / f"regular_sip_{interval}_market_data"
+                for interval in ("5min", "15min", "1hour", "4hour", "1day")
+            }
             input_path = (
                 collection_root
                 / "raw"
@@ -367,7 +364,7 @@ class DailyPipelineTests(unittest.TestCase):
             with (
                 patch("daily_pipeline.COLLECTION_ROOT", collection_root),
                 patch("daily_pipeline.FILTERED_ROOT", filtered_root),
-                patch("daily_pipeline.RESAMPLED_ROOT", resampled_root),
+                patch("daily_pipeline.RESAMPLED_ROOTS", resampled_roots),
             ):
                 filtered = run_filter(
                     "csv",
@@ -378,15 +375,19 @@ class DailyPipelineTests(unittest.TestCase):
                     end,
                     data_type="raw",
                 )
-                resampled = run_resample(
-                    "csv",
-                    ["AAPL"],
-                    state,
-                    target,
-                    start,
-                    end,
-                    data_type="raw",
-                )
+                resampled = {
+                    interval: run_resample(
+                        "csv",
+                        ["AAPL"],
+                        state,
+                        target,
+                        start,
+                        end,
+                        data_type="raw",
+                        bar_interval=interval,
+                    )
+                    for interval in resampled_roots
+                }
                 audited = run_validation(
                     "csv",
                     reports=reports,
@@ -394,8 +395,10 @@ class DailyPipelineTests(unittest.TestCase):
                 )
 
             self.assertEqual(filtered[:3], (1, 5, 5))
-            self.assertEqual(resampled[:3], (1, 5, 1))
-            self.assertEqual(audited, (2, 0))
+            self.assertTrue(
+                all(result[:3] == (1, 5, 1) for result in resampled.values())
+            )
+            self.assertEqual(audited, (6, 0))
             self.assertTrue(
                 (
                     filtered_root
@@ -404,20 +407,22 @@ class DailyPipelineTests(unittest.TestCase):
                     / "AAPL_1min_sip_historical.csv"
                 ).is_file()
             )
-            self.assertTrue(
-                (
-                    resampled_root
-                    / "raw"
-                    / "csv"
-                    / "AAPL_5min_sip_historical.csv"
-                ).is_file()
-            )
+            for interval, resampled_root in resampled_roots.items():
+                self.assertTrue(
+                    (
+                        resampled_root
+                        / "raw"
+                        / "csv"
+                        / f"AAPL_{interval}_sip_historical.csv"
+                    ).is_file()
+                )
             self.assertTrue(
                 (reports.latest_root / "raw_1min_summary.csv").is_file()
             )
-            self.assertTrue(
-                (reports.latest_root / "raw_5min_summary.csv").is_file()
-            )
+            for interval in resampled_roots:
+                self.assertTrue(
+                    (reports.latest_root / f"raw_{interval}_summary.csv").is_file()
+                )
 
 
 if __name__ == "__main__":
