@@ -26,7 +26,7 @@ from data_filtering.filter_regular_session import (
 
 SOURCE_ROOT = PROJECT_ROOT / "regular_sip_1min_market_data"
 DESTINATION_ROOT = PROJECT_ROOT / "regular_sip_5min_market_data"
-DATA_TYPE = "adjusted"
+DEFAULT_DATA_TYPE = "adjusted"
 FIVE_MINUTES = "5min"
 REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
 
@@ -142,11 +142,13 @@ def build_resample_source(
     storage_format: str,
     source_root: Path = SOURCE_ROOT,
     destination_root: Path = DESTINATION_ROOT,
+    data_type: str = DEFAULT_DATA_TYPE,
 ) -> ResampleSource:
+    """Build matching adjusted or raw one-minute input and five-minute output paths."""
     return ResampleSource(
         storage_format=storage_format,
-        source_dir=source_root / DATA_TYPE / storage_format,
-        destination_dir=destination_root / DATA_TYPE / storage_format,
+        source_dir=source_root / data_type / storage_format,
+        destination_dir=destination_root / data_type / storage_format,
     )
 
 
@@ -263,7 +265,7 @@ def choose_storage_format() -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="정규장 SIP Adjusted 1분봉을 5분봉으로 집계합니다."
+        description="정규장 SIP Adjusted 또는 Raw 1분봉을 5분봉으로 집계합니다."
     )
     parser.add_argument(
         "--format",
@@ -271,13 +273,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("csv", "parquet"),
         help="입출력 형식 (미지정 시 실행 중 선택)",
     )
+    parser.add_argument(
+        "--data-type",
+        choices=("adjusted", "raw"),
+        default=DEFAULT_DATA_TYPE,
+        help=f"가격 데이터 타입 (기본값: {DEFAULT_DATA_TYPE})",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     storage_format = args.storage_format or choose_storage_format()
-    source = build_resample_source(storage_format)
+    source = build_resample_source(storage_format, data_type=args.data_type)
     try:
         processed_files, source_rows, output_rows = process_resample_source(source)
     except (OSError, ValueError, ImportError) as exc:

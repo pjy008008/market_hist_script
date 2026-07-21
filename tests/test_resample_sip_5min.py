@@ -6,6 +6,7 @@ import pandas as pd
 
 from data_filtering.resample_sip_5min import (
     ResampleSource,
+    build_resample_source,
     process_resample_file_incrementally,
     process_resample_source,
     resample_sip_five_minutes,
@@ -74,6 +75,25 @@ class ResampleSipFiveMinutesTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["source_minutes"], 4)
         self.assertEqual(result.iloc[0]["volume"], 1000)
+
+    def test_raw_source_and_destination_use_raw_directories(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = build_resample_source(
+                "parquet",
+                source_root=root / "one_minute",
+                destination_root=root / "five_minute",
+                data_type="raw",
+            )
+
+            self.assertEqual(
+                source.source_dir,
+                root / "one_minute" / "raw" / "parquet",
+            )
+            self.assertEqual(
+                source.destination_dir,
+                root / "five_minute" / "raw" / "parquet",
+            )
 
     def test_csv_source_is_saved_with_five_minute_file_name(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
