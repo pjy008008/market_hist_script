@@ -5,10 +5,12 @@ from pathlib import Path
 import pandas as pd
 
 from data_filtering.resample_sip_5min import (
+    BAR_INTERVALS,
     ResampleSource,
     build_resample_source,
     process_resample_file_incrementally,
     process_resample_source,
+    resample_sip_bars,
     resample_sip_five_minutes,
 )
 
@@ -75,6 +77,44 @@ class ResampleSipFiveMinutesTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["source_minutes"], 4)
         self.assertEqual(result.iloc[0]["volume"], 1000)
+
+    def test_all_intervals_align_to_session_open(self):
+        timestamps = pd.date_range(
+            "2025-02-03 14:30:00+00:00",
+            periods=390,
+            freq="1min",
+        )
+        index = pd.MultiIndex.from_arrays(
+            [["AAP"] * len(timestamps), timestamps],
+            names=["symbol", "timestamp"],
+        )
+        dataframe = pd.DataFrame(
+            {
+                "open": range(390),
+                "high": [value + 1 for value in range(390)],
+                "low": range(390),
+                "close": [value + 0.5 for value in range(390)],
+                "volume": [100] * 390,
+            },
+            index=index,
+        )
+        expected = {
+            "5min": (78, [5] * 78),
+            "15min": (26, [15] * 26),
+            "1hour": (7, [60, 60, 60, 60, 60, 60, 30]),
+            "4hour": (2, [240, 150]),
+            "1day": (1, [390]),
+        }
+
+        self.assertEqual(tuple(BAR_INTERVALS), tuple(expected))
+        for interval, (row_count, source_minutes) in expected.items():
+            result = resample_sip_bars(dataframe, interval)
+            self.assertEqual(len(result), row_count)
+            self.assertEqual(result["source_minutes"].tolist(), source_minutes)
+            self.assertEqual(
+                result.index.get_level_values("timestamp")[0],
+                pd.Timestamp("2025-02-03 14:30:00+00:00"),
+            )
 
     def test_raw_source_and_destination_use_raw_directories(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -10,6 +10,10 @@ regular_market_data/
 sip_market_data/
 regular_sip_1min_market_data/
 regular_sip_5min_market_data/
+regular_sip_15min_market_data/
+regular_sip_1hour_market_data/
+regular_sip_4hour_market_data/
+regular_sip_1day_market_data/
 pipeline_state/
 report/pipeline_failures.json
 report/latest/

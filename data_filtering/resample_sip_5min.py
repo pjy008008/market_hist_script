@@ -1,4 +1,4 @@
-"""Build regular-session SIP five-minute bars from filtered one-minute bars."""
+"""Build regular-session SIP multi-interval bars from filtered one-minute bars."""
 
 from __future__ import annotations
 
@@ -26,8 +26,21 @@ from data_filtering.filter_regular_session import (
 
 SOURCE_ROOT = PROJECT_ROOT / "regular_sip_1min_market_data"
 DESTINATION_ROOT = PROJECT_ROOT / "regular_sip_5min_market_data"
+DESTINATION_ROOTS = {
+    "5min": DESTINATION_ROOT,
+    "15min": PROJECT_ROOT / "regular_sip_15min_market_data",
+    "1hour": PROJECT_ROOT / "regular_sip_1hour_market_data",
+    "4hour": PROJECT_ROOT / "regular_sip_4hour_market_data",
+    "1day": PROJECT_ROOT / "regular_sip_1day_market_data",
+}
+BAR_INTERVALS = {
+    "5min": pd.Timedelta(minutes=5),
+    "15min": pd.Timedelta(minutes=15),
+    "1hour": pd.Timedelta(hours=1),
+    "4hour": pd.Timedelta(hours=4),
+    "1day": pd.Timedelta(days=1),
+}
 DEFAULT_DATA_TYPE = "adjusted"
-FIVE_MINUTES = "5min"
 REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
 
 
@@ -38,8 +51,12 @@ class ResampleSource:
     destination_dir: Path
 
 
-def _resample_session(session: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate one symbol and one regular session into five-minute bars."""
+def _resample_session(
+    session: pd.DataFrame,
+    frequency: pd.Timedelta,
+    session_open: pd.Timestamp,
+) -> pd.DataFrame:
+    """Aggregate one symbol session into bars aligned to the exchange open."""
     rule = {
         "open": "first",
         "high": "max",
@@ -51,10 +68,10 @@ def _resample_session(session: pd.DataFrame) -> pd.DataFrame:
         rule["trade_count"] = "sum"
 
     resampler = session.resample(
-        FIVE_MINUTES,
+        frequency,
         closed="left",
         label="left",
-        origin="start_day",
+        origin=session_open,
     )
     aggregated = resampler.agg(rule)
     source_minutes = resampler["close"].count()
@@ -67,10 +84,10 @@ def _resample_session(session: pd.DataFrame) -> pd.DataFrame:
             (session["vwap"] * session["volume"])
             .where(valid_vwap)
             .resample(
-                FIVE_MINUTES,
+                frequency,
                 closed="left",
                 label="left",
-                origin="start_day",
+                origin=session_open,
             )
             .sum(min_count=1)
         )
@@ -78,10 +95,10 @@ def _resample_session(session: pd.DataFrame) -> pd.DataFrame:
             session["volume"]
             .where(valid_vwap)
             .resample(
-                FIVE_MINUTES,
+                frequency,
                 closed="left",
                 label="left",
-                origin="start_day",
+                origin=session_open,
             )
             .sum(min_count=1)
         )
@@ -107,20 +124,36 @@ def _resample_session(session: pd.DataFrame) -> pd.DataFrame:
     return aggregated[column_order]
 
 
-def resample_sip_five_minutes(
+def resample_sip_bars(
     dataframe: pd.DataFrame,
+    bar_interval: str,
     calendar_name: str = DEFAULT_CALENDAR,
 ) -> pd.DataFrame:
-    """Aggregate filtered SIP one-minute bars by symbol and exchange session."""
+    """Aggregate filtered SIP one-minute bars into the selected interval."""
+    if bar_interval not in BAR_INTERVALS:
+        raise ValueError(f"지원하지 않는 봉 간격입니다: {bar_interval}")
     normalized = normalize_timestamp_index(dataframe)
     missing_columns = REQUIRED_COLUMNS.difference(normalized.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
-        raise ValueError(f"5분봉 생성에 필요한 컬럼이 없습니다: {missing}")
+        raise ValueError(f"봉 생성에 필요한 컬럼이 없습니다: {missing}")
     if normalized.empty:
         return normalized.copy()
 
     calendar = mcal.get_calendar(calendar_name)
+    all_timestamps = pd.DatetimeIndex(
+        normalized.index.get_level_values("timestamp")
+    )
+    local_dates = all_timestamps.tz_convert(calendar.tz)
+    schedule = calendar.schedule(
+        start_date=local_dates.min().date(),
+        end_date=local_dates.max().date(),
+        tz="UTC",
+    )
+    session_opens = {
+        session_date.date(): pd.Timestamp(market_open)
+        for session_date, market_open in schedule["market_open"].items()
+    }
     frames: list[pd.DataFrame] = []
     symbols = normalized.index.get_level_values("symbol").unique()
     for symbol in symbols:
@@ -128,7 +161,16 @@ def resample_sip_five_minutes(
         local_session_dates = symbol_frame.index.tz_convert(calendar.tz).normalize()
         for session_date in local_session_dates.unique():
             session = symbol_frame.loc[local_session_dates == session_date]
-            aggregated = _resample_session(session)
+            session_open = session_opens.get(pd.Timestamp(session_date).date())
+            if session_open is None:
+                raise ValueError(
+                    f"거래 세션 시작 시각을 찾을 수 없습니다: {session_date}"
+                )
+            aggregated = _resample_session(
+                session,
+                BAR_INTERVALS[bar_interval],
+                session_open,
+            )
             if not aggregated.empty:
                 aggregated["symbol"] = symbol
                 frames.append(aggregated.reset_index().set_index(["symbol", "timestamp"]))
@@ -136,6 +178,14 @@ def resample_sip_five_minutes(
     if not frames:
         return normalized.iloc[0:0].copy()
     return pd.concat(frames).sort_index()
+
+
+def resample_sip_five_minutes(
+    dataframe: pd.DataFrame,
+    calendar_name: str = DEFAULT_CALENDAR,
+) -> pd.DataFrame:
+    """Backward-compatible five-minute aggregation wrapper."""
+    return resample_sip_bars(dataframe, "5min", calendar_name)
 
 
 def build_resample_source(
@@ -152,8 +202,13 @@ def build_resample_source(
     )
 
 
-def output_file_name(input_path: Path) -> str:
-    return input_path.name.replace("_1min_sip_historical", "_5min_sip_historical")
+def output_file_name(input_path: Path, bar_interval: str = "5min") -> str:
+    if bar_interval not in BAR_INTERVALS:
+        raise ValueError(f"지원하지 않는 봉 간격입니다: {bar_interval}")
+    return input_path.name.replace(
+        "_1min_sip_historical",
+        f"_{bar_interval}_sip_historical",
+    )
 
 
 def process_resample_file_incrementally(
@@ -164,6 +219,7 @@ def process_resample_file_incrementally(
     end_time: pd.Timestamp,
     calendar_name: str = DEFAULT_CALENDAR,
     recompute_from: pd.Timestamp | None = None,
+    bar_interval: str = "5min",
 ) -> tuple[int, int, int]:
     """Rebuild the last output session and append newly filtered sessions."""
     start = pd.Timestamp(start_time).tz_convert("UTC")
@@ -202,7 +258,7 @@ def process_resample_file_incrementally(
         retained = existing.loc[existing_timestamps < recompute_start].copy()
         candidate = source.loc[source_timestamps >= recompute_start].copy()
 
-    new_bars = resample_sip_five_minutes(candidate, calendar_name)
+    new_bars = resample_sip_bars(candidate, bar_interval, calendar_name)
     frames = [frame for frame in (retained, new_bars) if not frame.empty]
     if frames:
         combined = pd.concat(frames)
@@ -217,6 +273,7 @@ def process_resample_file_incrementally(
 def process_resample_source(
     source: ResampleSource,
     calendar_name: str = DEFAULT_CALENDAR,
+    bar_interval: str = "5min",
 ) -> tuple[int, int, int]:
     """Resample every one-minute file in a selected source directory."""
     if not source.source_dir.is_dir():
@@ -232,14 +289,18 @@ def process_resample_source(
     resampled_rows = 0
     for index, input_path in enumerate(input_files, 1):
         dataframe = load_market_data(input_path, source.storage_format)
-        resampled = resample_sip_five_minutes(dataframe, calendar_name)
-        output_path = source.destination_dir / output_file_name(input_path)
+        resampled = resample_sip_bars(dataframe, bar_interval, calendar_name)
+        output_path = source.destination_dir / output_file_name(
+            input_path,
+            bar_interval,
+        )
         save_market_data(resampled, output_path, source.storage_format)
         total_rows += len(dataframe)
         resampled_rows += len(resampled)
         print(
             f"[{index}/{len(input_files)}] {input_path.name}: "
-            f"{len(dataframe):,}개 1분봉 -> {len(resampled):,}개 5분봉"
+            f"{len(dataframe):,}개 1분봉 -> "
+            f"{len(resampled):,}개 {bar_interval}봉"
         )
     return len(input_files), total_rows, resampled_rows
 
@@ -265,7 +326,7 @@ def choose_storage_format() -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="정규장 SIP Adjusted 또는 Raw 1분봉을 5분봉으로 집계합니다."
+        description="정규장 SIP Adjusted 또는 Raw 1분봉을 여러 봉으로 집계합니다."
     )
     parser.add_argument(
         "--format",
@@ -279,23 +340,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_DATA_TYPE,
         help=f"가격 데이터 타입 (기본값: {DEFAULT_DATA_TYPE})",
     )
+    parser.add_argument(
+        "--interval",
+        choices=tuple(BAR_INTERVALS),
+        default="5min",
+        help="생성할 봉 간격 (기본값: 5min)",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     storage_format = args.storage_format or choose_storage_format()
-    source = build_resample_source(storage_format, data_type=args.data_type)
+    source = build_resample_source(
+        storage_format,
+        destination_root=DESTINATION_ROOTS[args.interval],
+        data_type=args.data_type,
+    )
     try:
-        processed_files, source_rows, output_rows = process_resample_source(source)
+        processed_files, source_rows, output_rows = process_resample_source(
+            source,
+            bar_interval=args.interval,
+        )
     except (OSError, ValueError, ImportError) as exc:
-        print(f"[오류] 5분봉 생성 실패: {exc}", file=sys.stderr)
+        print(f"[오류] {args.interval}봉 생성 실패: {exc}", file=sys.stderr)
         return 1
     if processed_files == 0:
         return 1
     print(
         f"완료: {processed_files}개 파일, "
-        f"{source_rows:,}개 1분봉 -> {output_rows:,}개 5분봉"
+        f"{source_rows:,}개 1분봉 -> {output_rows:,}개 {args.interval}봉"
     )
     return 0
 
