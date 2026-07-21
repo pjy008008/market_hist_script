@@ -7,7 +7,7 @@ Wikipedia와 Alpaca에서 최근 3년의 S&P 500 관련 종목을 수집하고, 
 스크립트는 역할에 따라 세 폴더로 분류합니다. 각 폴더의 자세한 실행법은 해당 README에서 확인할 수 있습니다.
 
 ```text
-script/
+market_hist_script/
 ├── daily_pipeline.py             # SIP 1분봉 일일 통합 파이프라인
 ├── pipeline_state.py             # 종목별 실행 체크포인트 관리
 ├── data_collection/              # API 호출 및 크롤링
@@ -42,7 +42,7 @@ script/
 스크립트 위치만 분류했으며 기존 데이터와 보고서의 출력 구조는 유지합니다.
 
 ```text
-script/
+market_hist_script/
 ├── market_data/                  # Raw 데이터
 │   ├── csv/
 │   └── parquet/
