@@ -56,18 +56,21 @@ regular_sip_1min_market_data/
 
 ### `resample_sip_5min.py`
 
-정규장 SIP Adjusted 1분봉을 종목·거래일별 5분봉으로 집계합니다. OHLC는 첫 시가, 최고 고가, 최저 저가, 마지막 종가를 사용하고 `volume`과 `trade_count`는 합산합니다. `vwap`은 1분봉 거래량으로 가중해 다시 계산하며, 각 구간에 실제로 존재한 1분봉 개수는 `source_minutes`로 저장합니다. 누락된 1분봉을 임의로 생성하거나 보간하지 않습니다.
+정규장 SIP Adjusted 또는 Raw 1분봉을 종목·거래일별 5분봉으로 집계합니다. OHLC는 첫 시가, 최고 고가, 최저 저가, 마지막 종가를 사용하고 `volume`과 `trade_count`는 합산합니다. `vwap`은 1분봉 거래량으로 가중해 다시 계산하며, 각 구간에 실제로 존재한 1분봉 개수는 `source_minutes`로 저장합니다. 누락된 1분봉을 임의로 생성하거나 보간하지 않습니다.
 
 ```bash
 python data_filtering/resample_sip_5min.py --format parquet
+
+# Raw 정규장 1분봉을 Raw 5분봉으로 집계
+python data_filtering/resample_sip_5min.py --format parquet --data-type raw
 ```
 
 ```text
-입력: regular_sip_1min_market_data/adjusted/{format}/
-출력: regular_sip_5min_market_data/adjusted/{format}/
+입력: regular_sip_1min_market_data/{adjusted,raw}/{format}/
+출력: regular_sip_5min_market_data/{adjusted,raw}/{format}/
 파일: {TICKER}_5min_sip_historical.{format}
 ```
 
-`daily_pipeline.py`를 실행하면 이 단계도 자동으로 수행됩니다.
+`daily_pipeline.py`를 실행하면 Adjusted와 Raw에 대해 이 단계가 각각 자동으로 수행됩니다.
 
 통합 파이프라인에서는 정규장 필터와 5분봉 생성을 증분 방식으로 처리합니다. 기존 결과의 마지막 거래 세션을 다시 계산해 부분 저장이나 마지막 5분 구간을 교체하고, 그보다 오래된 결과는 유지한 채 새 거래 세션만 병합합니다. 이 동작은 개별 스크립트의 전체 재생성 모드에는 영향을 주지 않습니다.

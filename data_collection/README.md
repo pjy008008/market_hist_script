@@ -24,7 +24,7 @@ python data_collection/script.py
 
 Alpaca SIP 피드를 명시해 현재 UTC 시각 15분 전까지의 최근 3년 1분봉을 수집합니다. Raw/Adjusted와 CSV/Parquet을 차례로 선택하며, 7일 단위로 요청하고 종목별 완료 시점에 안전하게 저장합니다. 기존 파일이 있으면 마지막 1분봉 다음부터 증분 갱신하고 3년 범위를 벗어난 과거 행은 제거합니다.
 
-통합 실행인 `daily_pipeline.py`는 Adjusted 데이터의 최근 10거래일을 매일 다시 조회합니다. 저장된 가격이 바뀌면 수정주가 이력 변경으로 판단하여 해당 종목의 3년 원본을 재수집하고 후속 정규장·5분봉 결과도 다시 계산합니다. 독립 실행인 `collect_sip_1min.py`는 기존과 같이 마지막 1분봉 이후만 증분 수집합니다.
+통합 실행인 `daily_pipeline.py`는 Adjusted와 Raw를 모두 수집합니다. Adjusted 데이터는 최근 10거래일을 매일 다시 조회하고, 저장된 가격이 바뀌면 수정주가 이력 변경으로 판단하여 해당 종목의 3년 원본을 재수집한 뒤 후속 정규장·5분봉 결과도 다시 계산합니다. Raw 데이터는 마지막 저장 1분봉 이후부터 증분 수집합니다. 독립 실행인 `collect_sip_1min.py`는 선택한 한 데이터 타입만 수집합니다.
 
 ```bash
 python data_collection/collect_sip_1min.py

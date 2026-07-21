@@ -2,9 +2,11 @@
 
 수집 데이터의 기본 상태와 정규장 데이터의 기간·누락 구간을 검사합니다.
 
-`quality_control.py`는 `daily_pipeline.py`에서 사용하는 자동 품질 검사 모듈입니다. 기본 일일 실행에서는 수집한 SIP 1분봉의 중복, OHLC 관계와 음수 거래량만 빠르게 검사하며 누락 API 재요청은 하지 않습니다. `daily_pipeline.py --deep-quality`를 지정하면 전체 정규장 누락을 분석하고 최근 10거래일의 누락 구간만 Alpaca에 재요청합니다. 복구되지 않은 누락은 실제 무거래일 수 있으므로 원본을 보간하지 않습니다.
+`quality_control.py`는 `daily_pipeline.py`에서 사용하는 자동 품질 검사 모듈입니다. 기본 일일 실행에서는 수집한 Adjusted·Raw SIP 1분봉의 중복, OHLC 관계와 음수 거래량을 데이터 타입별로 빠르게 검사하며 누락 API 재요청은 하지 않습니다. `daily_pipeline.py --deep-quality`를 지정하면 각 데이터 타입의 전체 정규장 누락을 분석하고 최근 10거래일의 누락 구간만 Alpaca에 재요청합니다. 복구되지 않은 누락은 실제 무거래일 수 있으므로 원본을 보간하지 않습니다.
 
 `daily_pipeline.py`가 만드는 요약 보고서는 `report/latest/{format}/`과 `report/history/{미국 거래일}/{format}/`에 함께 저장됩니다. 아래 `audit_regular_session.py`를 직접 실행할 때는 기존의 `regular_*_audit/` 경로를 사용합니다.
+
+Adjusted 보고서는 기존 `quality_summary.csv`, `1min_summary.csv`, `5min_summary.csv` 이름을 유지합니다. Raw 보고서는 같은 위치에 `raw_quality_summary.csv`, `raw_1min_summary.csv`, `raw_5min_summary.csv`처럼 `raw_` 접두사로 분리해 저장합니다. 상세 품질 모드의 Raw 누락 보고서도 `deep_quality/raw_*.csv`로 분리됩니다.
 
 ## 스크립트
 
