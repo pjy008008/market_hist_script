@@ -278,6 +278,7 @@ def audit_source(
         symbol = input_path.name
         for suffix in (
             f"_1min_sip_historical.{storage_format}",
+            f"_5min_sip_historical.{storage_format}",
             f"_5min_historical.{storage_format}",
         ):
             if symbol.endswith(suffix):
