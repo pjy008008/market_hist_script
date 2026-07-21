@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import pandas_market_calendars as mcal
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.trading.client import TradingClient
 from dotenv import load_dotenv
 
 from data_collection.collect_sip_1min import (
@@ -19,6 +20,7 @@ from data_collection.collect_sip_1min import (
     DEFAULT_CHUNK_DAYS,
     DEFAULT_REQUEST_DELAY_SECONDS,
     END_DELAY_MINUTES,
+    InactiveSymbolCache,
     YEARS_TO_COLLECT,
     storage_path,
     update_symbol_data,
@@ -210,6 +212,8 @@ def run_collection(
     refresh_start: datetime | None,
     retry_delay: float = SYMBOL_RETRY_DELAY_SECONDS,
     data_type: str = DEFAULT_DATA_TYPE,
+    asset_client: TradingClient | None = None,
+    inactive_cache: InactiveSymbolCache | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, pd.Timestamp]]:
     pending = list(symbols)
     last_attempts: dict[str, int] = {}
@@ -255,6 +259,8 @@ def run_collection(
                     DEFAULT_CHUNK_DAYS,
                     DEFAULT_REQUEST_DELAY_SECONDS,
                     refresh_start,
+                    asset_client,
+                    inactive_cache,
                 )
                 succeeded = bool(result)
                 error = "" if succeeded else "종목 수집 처리 실패"
@@ -281,6 +287,7 @@ def run_collection(
                     ),
                     "adjustment_revision": result.adjustment_revision,
                     "added_rows": result.added_rows,
+                    "inactive": result.inactive,
                 },
             )
             if not succeeded:
@@ -812,6 +819,8 @@ def run_pipeline(
     print("=" * 72)
 
     client = StockHistoricalDataClient(api_key, secret_key)
+    asset_client = TradingClient(api_key, secret_key)
+    inactive_cache = InactiveSymbolCache()
     failures: list[dict[str, object]] = []
     changed_by_type: dict[str, dict[str, pd.Timestamp]] = {}
     collected_by_type: dict[str, list[str]] = {}
@@ -851,6 +860,8 @@ def run_pipeline(
             target_session_utc,
             refresh_start if data_type == "adjusted" else None,
             data_type=data_type,
+            asset_client=asset_client,
+            inactive_cache=inactive_cache,
         )
         failures.extend(collection_failures)
         failed_symbols = {

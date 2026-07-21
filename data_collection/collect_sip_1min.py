@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -15,6 +16,8 @@ from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import AssetStatus
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +32,9 @@ END_DELAY_MINUTES = 15
 DEFAULT_CHUNK_DAYS = 7
 DEFAULT_REQUEST_DELAY_SECONDS = 0.35
 TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
+INACTIVE_SYMBOL_CACHE_PATH = PROJECT_ROOT / "pipeline_state" / "inactive_symbols.json"
+STALE_SYMBOL_DAYS = 30
+INACTIVE_CACHE_TTL_DAYS = 30
 PRICE_COLUMNS = ("open", "high", "low", "close", "vwap")
 
 
@@ -40,9 +46,157 @@ class CollectionResult:
     changed_from_utc: pd.Timestamp | None = None
     adjustment_revision: bool = False
     added_rows: int = 0
+    inactive: bool = False
 
     def __bool__(self) -> bool:
         return self.success
+
+
+class InactiveSymbolCache:
+    """Persist confirmed inactive symbols and avoid duplicate checks in one run."""
+
+    def __init__(self, path: Path = INACTIVE_SYMBOL_CACHE_PATH) -> None:
+        self.path = path
+        self.symbols = self._load()
+        self.active_this_run: set[str] = set()
+
+    def _load(self) -> dict[str, dict[str, str]]:
+        if not self.path.is_file():
+            return {}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("version") != 1
+                or not isinstance(payload.get("symbols"), dict)
+            ):
+                raise ValueError("unsupported cache format")
+            return payload["symbols"]
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"[경고] 비활성 종목 캐시를 읽지 못해 새로 시작합니다: {exc}")
+            return {}
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        payload = {"version": 1, "symbols": self.symbols}
+        try:
+            temporary_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary_path, self.path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def is_fresh_inactive(
+        self,
+        symbol: str,
+        last_bar: pd.Timestamp,
+        checked_at: pd.Timestamp,
+    ) -> bool:
+        entry = self.symbols.get(symbol)
+        if not isinstance(entry, dict) or entry.get("status") != "inactive":
+            return False
+        try:
+            cached_last_bar = pd.Timestamp(entry["last_bar_utc"])
+            cached_checked_at = pd.Timestamp(entry["checked_at_utc"])
+        except (KeyError, TypeError, ValueError):
+            self.symbols.pop(symbol, None)
+            return False
+        if cached_last_bar.tzinfo is None:
+            cached_last_bar = cached_last_bar.tz_localize("UTC")
+        else:
+            cached_last_bar = cached_last_bar.tz_convert("UTC")
+        if cached_checked_at.tzinfo is None:
+            cached_checked_at = cached_checked_at.tz_localize("UTC")
+        else:
+            cached_checked_at = cached_checked_at.tz_convert("UTC")
+        cache_age = checked_at - cached_checked_at
+        return (
+            last_bar <= cached_last_bar
+            and pd.Timedelta(0)
+            <= cache_age
+            <= pd.Timedelta(days=INACTIVE_CACHE_TTL_DAYS)
+        )
+
+    def mark_inactive(
+        self,
+        symbol: str,
+        last_bar: pd.Timestamp,
+        checked_at: pd.Timestamp,
+    ) -> None:
+        self.active_this_run.discard(symbol)
+        self.symbols[symbol] = {
+            "status": "inactive",
+            "last_bar_utc": last_bar.isoformat(),
+            "checked_at_utc": checked_at.isoformat(),
+        }
+        try:
+            self._save()
+        except OSError as exc:
+            print(f"[{symbol}] 비활성 종목 캐시 저장 실패(이번 실행에서는 적용): {exc}")
+
+    def mark_active(self, symbol: str) -> None:
+        self.active_this_run.add(symbol)
+        if self.symbols.pop(symbol, None) is not None:
+            try:
+                self._save()
+            except OSError as exc:
+                print(f"[{symbol}] 비활성 종목 캐시 정리 실패: {exc}")
+
+
+def should_skip_inactive_symbol(
+    asset_client: TradingClient | None,
+    inactive_cache: InactiveSymbolCache | None,
+    symbol: str,
+    last_timestamp: datetime,
+    end_time: datetime,
+) -> bool:
+    """Return true only when a stale symbol is confirmed inactive by Alpaca."""
+    if asset_client is None or inactive_cache is None:
+        return False
+
+    last_bar = pd.Timestamp(last_timestamp)
+    checked_at = pd.Timestamp(end_time)
+    if last_bar.tzinfo is None:
+        last_bar = last_bar.tz_localize("UTC")
+    else:
+        last_bar = last_bar.tz_convert("UTC")
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.tz_localize("UTC")
+    else:
+        checked_at = checked_at.tz_convert("UTC")
+
+    if checked_at - last_bar < pd.Timedelta(days=STALE_SYMBOL_DAYS):
+        return False
+    if inactive_cache.is_fresh_inactive(symbol, last_bar, checked_at):
+        print(
+            f"[{symbol}] Alpaca 비활성 종목 캐시 확인 - "
+            f"마지막 봉 {last_bar.isoformat()} 이후 조회 생략"
+        )
+        return True
+    if symbol in inactive_cache.active_this_run:
+        return False
+
+    try:
+        asset = asset_client.get_asset(alpaca_symbol(symbol))
+        status = asset.get("status") if isinstance(asset, dict) else asset.status
+        status_value = getattr(status, "value", status)
+    except Exception as exc:
+        print(f"[{symbol}] Alpaca 자산 상태 확인 실패 - 기존 수집 계속: {exc}")
+        return False
+
+    if status_value != AssetStatus.INACTIVE.value:
+        inactive_cache.mark_active(symbol)
+        return False
+
+    inactive_cache.mark_inactive(symbol, last_bar, checked_at)
+    print(
+        f"[{symbol}] Alpaca 비활성 종목 확인 - "
+        f"마지막 봉 {last_bar.isoformat()} 이후 조회 생략"
+    )
+    return True
 
 
 def alpaca_symbol(symbol: str) -> str:
@@ -323,6 +477,8 @@ def process_symbol(
     end_time: datetime,
     chunk_days: int,
     request_delay: float,
+    asset_client: TradingClient | None = None,
+    inactive_cache: InactiveSymbolCache | None = None,
 ) -> bool:
     file_path = storage_path(symbol, data_type, storage_format, output_root)
     existing = pd.DataFrame()
@@ -343,6 +499,10 @@ def process_symbol(
         last_timestamp = pd.Timestamp(
             existing.index.get_level_values("timestamp").max()
         ).to_pydatetime()
+        if should_skip_inactive_symbol(
+            asset_client, inactive_cache, symbol, last_timestamp, end_time
+        ):
+            return True
         fetch_start = max(start_time, last_timestamp + timedelta(minutes=1))
 
     new_frames: list[pd.DataFrame] = []
@@ -385,6 +545,8 @@ def update_symbol_data(
     chunk_days: int,
     request_delay: float,
     refresh_start: datetime | None = None,
+    asset_client: TradingClient | None = None,
+    inactive_cache: InactiveSymbolCache | None = None,
 ) -> CollectionResult:
     """Append data and re-fetch adjusted overlap to detect historical revisions."""
     file_path = storage_path(symbol, data_type, storage_format, output_root)
@@ -404,6 +566,10 @@ def update_symbol_data(
         last_timestamp = pd.Timestamp(
             existing.index.get_level_values("timestamp").max()
         ).to_pydatetime()
+        if should_skip_inactive_symbol(
+            asset_client, inactive_cache, symbol, last_timestamp, end_time
+        ):
+            return CollectionResult(True, inactive=True)
         fetch_start = max(start_time, last_timestamp + timedelta(minutes=1))
         if refresh_start is not None:
             fetch_start = max(start_time, min(fetch_start, refresh_start))
@@ -571,6 +737,8 @@ def main(argv: list[str] | None = None) -> int:
     print("주의: 전체 종목의 3년치 1분봉은 실행 시간과 저장 공간이 매우 큽니다.")
 
     client = StockHistoricalDataClient(api_key, secret_key)
+    asset_client = TradingClient(api_key, secret_key)
+    inactive_cache = InactiveSymbolCache()
     failed_symbols: list[str] = []
     for index, symbol in enumerate(symbols, 1):
         print(f"\n[{index}/{len(symbols)}] {symbol} 수집 시작")
@@ -584,6 +752,8 @@ def main(argv: list[str] | None = None) -> int:
             end_time,
             args.chunk_days,
             args.request_delay,
+            asset_client,
+            inactive_cache,
         )
         if not succeeded:
             failed_symbols.append(symbol)

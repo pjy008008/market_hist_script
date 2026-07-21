@@ -107,6 +107,8 @@ class DailyPipelineTests(unittest.TestCase):
             patch("daily_pipeline.PipelineStateStore") as mock_state_class,
             patch("daily_pipeline.DailyReportStore") as mock_report_store_class,
             patch("daily_pipeline.StockHistoricalDataClient") as mock_client,
+            patch("daily_pipeline.TradingClient") as mock_asset_client,
+            patch("daily_pipeline.InactiveSymbolCache") as mock_inactive_cache,
             patch(
                 "daily_pipeline.run_collection", return_value=([], changes)
             ) as mock_collect,
@@ -144,6 +146,8 @@ class DailyPipelineTests(unittest.TestCase):
                     pd.Timestamp(window[1]).isoformat(),
                     refresh_start,
                     data_type="adjusted",
+                    asset_client=mock_asset_client.return_value,
+                    inactive_cache=mock_inactive_cache.return_value,
                 ),
                 call(
                     mock_client.return_value,
@@ -155,6 +159,8 @@ class DailyPipelineTests(unittest.TestCase):
                     pd.Timestamp(window[1]).isoformat(),
                     None,
                     data_type="raw",
+                    asset_client=mock_asset_client.return_value,
+                    inactive_cache=mock_inactive_cache.return_value,
                 ),
             ]
         )
