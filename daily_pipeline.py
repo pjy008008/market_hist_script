@@ -25,6 +25,7 @@ from data_collection.collect_sip_1min import (
     storage_path,
     update_symbol_data,
 )
+from data_collection.etf_universe import load_etf_symbols
 from data_collection.get_ticker import get_historical_sp500_tickers
 from data_filtering.filter_regular_session import (
     DEFAULT_CALENDAR,
@@ -181,24 +182,36 @@ def save_ticker_file(symbols: list[str], file_path: Path = TICKER_FILE) -> None:
 def load_pipeline_symbols(
     file_path: Path = TICKER_FILE,
     minimum_count: int = MIN_EXPECTED_TICKERS,
+    additional_symbols: list[str] | None = None,
 ) -> list[str]:
-    """Refresh tickers, preserving a valid cached universe on crawl failure."""
+    """Refresh S&P tickers and merge curated additional instruments."""
     fetched = get_historical_sp500_tickers(years=YEARS_TO_COLLECT)
     if len(fetched) >= minimum_count:
-        symbols = sorted(set(fetched))
-        save_ticker_file(symbols, file_path)
-        return symbols
-
-    cached = read_ticker_file(file_path)
-    if len(cached) >= minimum_count:
+        sp500_symbols = sorted(set(fetched))
+        save_ticker_file(sp500_symbols, file_path)
+    else:
+        cached = read_ticker_file(file_path)
+        if len(cached) < minimum_count:
+            raise RuntimeError(
+                "S&P 500 티커 목록을 정상적으로 가져오지 못했고 사용할 기존 목록도 없습니다."
+            )
         print(
             f"[경고] 티커 갱신 결과가 {len(fetched)}개뿐이어서 "
             f"기존 {len(cached)}개 목록을 사용합니다."
         )
-        return cached
-    raise RuntimeError(
-        "S&P 500 티커 목록을 정상적으로 가져오지 못했고 사용할 기존 목록도 없습니다."
+        sp500_symbols = cached
+
+    extras = {
+        symbol.strip().upper()
+        for symbol in (additional_symbols or [])
+        if symbol.strip()
+    }
+    combined = sorted(set(sp500_symbols).union(extras))
+    print(
+        f"종목 유니버스: S&P 500 관련 {len(sp500_symbols)}개 + "
+        f"ETF {len(extras)}개 = 중복 제거 총 {len(combined)}개"
     )
+    return combined
 
 
 def run_collection(
@@ -787,7 +800,8 @@ def run_pipeline(
         start_time, end_time = completed_collection_window(now)
         refresh_start = adjusted_refresh_start(end_time)
         print("Wikipedia에서 최근 3년 S&P 500 관련 티커를 갱신합니다...")
-        symbols = load_pipeline_symbols()
+        etf_symbols = load_etf_symbols(as_of=end_time)
+        symbols = load_pipeline_symbols(additional_symbols=etf_symbols)
         state = PipelineStateStore()
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[오류] 실행 준비 실패: {exc}", file=sys.stderr)
@@ -814,7 +828,10 @@ def run_pipeline(
     print(f"저장 형식   : {storage_format}")
     print(f"수집 기간   : {start_time.isoformat()} ~ {end_time.isoformat()}")
     print(f"마지막 세션 : {end_time.astimezone(timezone.utc).isoformat()}")
-    print(f"대상 종목   : {len(symbols)}개")
+    print(
+        f"대상 종목   : {len(symbols)}개 "
+        f"(ETF {len(etf_symbols)}개 포함)"
+    )
     print(f"품질 모드   : {'상세 검사·누락 복구' if deep_quality else '빠른 구조 검사'}")
     print("=" * 72)
 
@@ -1075,6 +1092,9 @@ def run_pipeline(
             "quality_mode": "deep" if deep_quality else "fast",
             "data_types": list(DATA_TYPES),
             "symbols_total": len(symbols),
+            "sp500_related_symbols_total": len(set(symbols).difference(etf_symbols)),
+            "etf_symbols_total": len(etf_symbols),
+            "etf_symbols": etf_symbols,
             **totals,
             "bars_by_interval": bar_totals,
             "by_data_type": metrics_by_type,
