@@ -21,6 +21,7 @@ report/history/
 *.parquet
 *.csv
 *.txt
+!ticker_info/etf_universe.csv
 
 # === Python 가상환경 및 캐시 파일 제외 ===
 __pycache__/
