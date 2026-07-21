@@ -276,14 +276,14 @@ def audit_source(
 
     for index, input_path in enumerate(input_files, 1):
         symbol = input_path.name
-        for suffix in (
-            f"_1min_sip_historical.{storage_format}",
-            f"_5min_sip_historical.{storage_format}",
-            f"_5min_historical.{storage_format}",
-        ):
-            if symbol.endswith(suffix):
-                symbol = symbol[: -len(suffix)]
-                break
+        sip_suffix = f"_sip_historical.{storage_format}"
+        if symbol.endswith(sip_suffix):
+            symbol_with_interval = symbol[: -len(sip_suffix)]
+            symbol = symbol_with_interval.rsplit("_", 1)[0]
+        else:
+            legacy_suffix = f"_5min_historical.{storage_format}"
+            if symbol.endswith(legacy_suffix):
+                symbol = symbol[: -len(legacy_suffix)]
         try:
             dataframe = load_market_data(input_path, storage_format)
             summary, missing_intervals = audit_dataframe(

@@ -1,8 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
-from data_validation.audit_regular_session import audit_dataframe
+from data_validation.audit_regular_session import audit_dataframe, audit_source
 
 
 class AuditRegularSessionTests(unittest.TestCase):
@@ -91,6 +93,29 @@ class AuditRegularSessionTests(unittest.TestCase):
         self.assertEqual(summary["missing_bars"], 2)
         self.assertEqual(summary["missing_intervals"], 2)
         self.assertEqual(intervals, [])
+
+    def test_multi_interval_sip_filename_reports_only_ticker(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source_dir = Path(temporary_directory)
+            self.make_frame(
+                [
+                    "2025-02-03 14:30:00+00:00",
+                    "2025-02-03 14:45:00+00:00",
+                ]
+            ).to_csv(
+                source_dir / "AAPL_15min_sip_historical.csv",
+                index=True,
+            )
+
+            summary, _ = audit_source(
+                source_dir,
+                "csv",
+                "XNYS",
+                pd.Timedelta(minutes=15),
+                include_intervals=False,
+            )
+
+            self.assertEqual(summary.loc[0, "symbol"], "AAPL")
 
 
 if __name__ == "__main__":
