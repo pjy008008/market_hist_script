@@ -8,6 +8,41 @@ from pipeline_state import PipelineStateStore, replace_with_retry
 
 
 class PipelineStateStoreTests(unittest.TestCase):
+    def test_multi_output_checkpoint_requires_every_file(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state = PipelineStateStore(root / "state.json")
+            outputs = [root / "one.parquet", root / "four.parquet"]
+            for output in outputs:
+                output.write_text("ok", encoding="utf-8")
+            state.mark_stage(
+                "parquet",
+                "AAPL",
+                "long_term_collection",
+                "success",
+                "2026-01-02T21:00:00+00:00",
+                1,
+            )
+            self.assertTrue(
+                state.is_complete_outputs(
+                    "parquet",
+                    "AAPL",
+                    "long_term_collection",
+                    "2026-01-02T21:00:00+00:00",
+                    outputs,
+                )
+            )
+            outputs[1].unlink()
+            self.assertFalse(
+                state.is_complete_outputs(
+                    "parquet",
+                    "AAPL",
+                    "long_term_collection",
+                    "2026-01-02T21:00:00+00:00",
+                    outputs,
+                )
+            )
+
     def test_stage_checkpoint_persists_and_requires_output_file(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

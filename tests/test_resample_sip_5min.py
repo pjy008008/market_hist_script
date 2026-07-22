@@ -78,6 +78,20 @@ class ResampleSipFiveMinutesTests(unittest.TestCase):
         self.assertEqual(result.iloc[0]["source_minutes"], 4)
         self.assertEqual(result.iloc[0]["volume"], 1000)
 
+    def test_source_minutes_can_represent_thirty_minute_input_bars(self):
+        dataframe = self.make_frame(
+            [
+                "2025-02-03 14:30:00+00:00",
+                "2025-02-03 15:00:00+00:00",
+            ]
+        )
+        result = resample_sip_bars(
+            dataframe,
+            "1hour",
+            source_bar_minutes=30,
+        )
+        self.assertEqual(result.iloc[0]["source_minutes"], 60)
+
     def test_all_intervals_align_to_session_open(self):
         timestamps = pd.date_range(
             "2025-02-03 14:30:00+00:00",

@@ -1,11 +1,11 @@
 """위키피디아에서 S&P 500 티커를 확인하는 스크립트."""
 
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 import urllib.request
 
-def get_historical_sp500_tickers(years=3):
+def get_historical_sp500_tickers(years=10):
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     
     # 403 Forbidden 우회를 위해 브라우저 정보 설정
@@ -54,9 +54,9 @@ def get_historical_sp500_tickers(years=3):
     df_changes['Date'] = pd.to_datetime(df_changes['Date'], errors='coerce')
     df_changes = df_changes.dropna(subset=['Date'])
     
-    # 최근 3년 기준일 계산
-    three_years_ago = datetime.now() - timedelta(days=years * 365)
-    recent_changes = df_changes[df_changes['Date'] >= three_years_ago]
+    # 요청한 연수만큼의 S&P 500 편출 이력을 포함한다.
+    history_cutoff = pd.Timestamp(datetime.now()) - pd.DateOffset(years=years)
+    recent_changes = df_changes[df_changes['Date'] >= history_cutoff]
     
     # 편출(Removed)된 종목들 확보
     removed_tickers = []
@@ -73,7 +73,7 @@ def get_historical_sp500_tickers(years=3):
         tickers_to_add = [t.strip() for t in tickers_to_add if t.strip() and len(t.strip()) <= 6 and not any(char.isdigit() for char in t)]
         removed_tickers.extend(tickers_to_add)
             
-    # 3. 현재 종목과 최근 3년간 퇴출된 종목 병합
+    # 3. 현재 종목과 지정 기간 동안 퇴출된 종목 병합
     all_historical_tickers = current_tickers.union(set(removed_tickers))
     
     # 대문자 표준화 및 최종 길이 필터링
@@ -83,6 +83,6 @@ def get_historical_sp500_tickers(years=3):
 
 if __name__ == "__main__":
     print("위키피디아에서 S&P 500 히스토리컬 티커 수집 중...")
-    tickers = get_historical_sp500_tickers(years=3)
-    print(f"\n최근 3년간 S&P 500에 존재했던 총 티커 수: {len(tickers)}")
+    tickers = get_historical_sp500_tickers(years=10)
+    print(f"\n최근 10년간 S&P 500에 존재했던 총 티커 수: {len(tickers)}")
     print("티커 예시 (앞 20개):", tickers[:20])

@@ -19,7 +19,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 TICKER_INFO_DIR = PROJECT_ROOT / "ticker_info"   # 티커 목록 저장용 폴더 경로
-TICKER_FILE = os.path.join(TICKER_INFO_DIR, "sp500_tickers_3years.txt")
+TICKER_FILE = os.path.join(TICKER_INFO_DIR, "sp500_tickers_10years.txt")
+TICKER_LOOKBACK_YEARS = 10
 
 # Alpaca 클라이언트 초기화
 if not API_KEY or not SECRET_KEY or API_KEY == "YOUR_ALPACA_API_KEY" or SECRET_KEY == "YOUR_ALPACA_SECRET_KEY":
@@ -112,7 +113,7 @@ def save_local_data(df, file_path, storage_format):
 
 
 def get_sp500_tickers():
-    """위키피디아에서 최근 3년간 존재했던 S&P 500 히스토리컬 티커 목록을 가져옵니다."""
+    """위키피디아에서 최근 10년간 존재했던 S&P 500 히스토리컬 티커 목록을 가져옵니다."""
     import urllib.request
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     req = urllib.request.Request(
@@ -127,7 +128,7 @@ def get_sp500_tickers():
         df_current = tables[0]
         current_tickers = set(df_current['Symbol'].str.replace('.', '/', regex=False).tolist())
         
-        # 2. 최근 3년 내 퇴출된 종목 추출
+        # 2. 최근 10년 내 퇴출된 종목 추출
         df_changes = tables[1].copy()
         if isinstance(df_changes.columns, pd.MultiIndex):
             df_changes.columns = [col[-1].strip() for col in df_changes.columns]
@@ -142,11 +143,14 @@ def get_sp500_tickers():
         df_changes = df_changes.dropna(subset=['Date'])
         
         # 타임존 에러 완벽 해결: pd.Timestamp를 사용하고 tz 정보를 완전히 제거(tz=None)
-        three_years_ago = pd.Timestamp(datetime.now()).replace(tzinfo=None) - pd.Timedelta(days=3 * 365)
+        history_cutoff = (
+            pd.Timestamp(datetime.now()).replace(tzinfo=None)
+            - pd.DateOffset(years=TICKER_LOOKBACK_YEARS)
+        )
         
         # 데이터프레임의 Date 컬럼도 타임존이 없는 상태로 일치시킨 뒤 비교
         df_changes['Date'] = df_changes['Date'].dt.tz_localize(None)
-        recent_changes = df_changes[df_changes['Date'] >= three_years_ago]
+        recent_changes = df_changes[df_changes['Date'] >= history_cutoff]
         
         removed_tickers = []
         removed_cols = [col for col in recent_changes.columns if 'Removed' in col or 'Ticker' in col]

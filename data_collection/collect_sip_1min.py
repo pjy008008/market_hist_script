@@ -28,10 +28,11 @@ from data_collection.get_ticker import get_historical_sp500_tickers
 
 
 YEARS_TO_COLLECT = 3
+TICKER_LOOKBACK_YEARS = 10
 END_DELAY_MINUTES = 15
 DEFAULT_CHUNK_DAYS = 7
 DEFAULT_REQUEST_DELAY_SECONDS = 0.35
-TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
+TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_10years.txt"
 INACTIVE_SYMBOL_CACHE_PATH = PROJECT_ROOT / "pipeline_state" / "inactive_symbols.json"
 STALE_SYMBOL_DAYS = 30
 INACTIVE_CACHE_TTL_DAYS = 30
@@ -673,7 +674,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--symbols",
-        help="쉼표로 구분한 종목 목록 (미지정 시 최근 3년 S&P 500 관련 종목)",
+        help="쉼표로 구분한 종목 목록 (미지정 시 최근 10년 S&P 500 관련 종목)",
     )
     parser.add_argument(
         "--output-dir",
@@ -720,8 +721,8 @@ def main(argv: list[str] | None = None) -> int:
             {symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()}
         )
     else:
-        print("Wikipedia에서 최근 3년 S&P 500 관련 티커를 확인합니다...")
-        symbols = get_historical_sp500_tickers(years=YEARS_TO_COLLECT)
+        print("Wikipedia에서 최근 10년 S&P 500 관련 티커를 확인합니다...")
+        symbols = get_historical_sp500_tickers(years=TICKER_LOOKBACK_YEARS)
         TICKER_FILE.parent.mkdir(parents=True, exist_ok=True)
         TICKER_FILE.write_text("\n".join(symbols) + "\n", encoding="utf-8")
 

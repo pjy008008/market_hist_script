@@ -124,6 +124,23 @@ class PipelineStateStore:
             and entry.get("target_session_utc") == target_session_utc
         )
 
+    def is_complete_outputs(
+        self,
+        storage_format: str,
+        symbol: str,
+        stage: str,
+        target_session_utc: str,
+        output_paths: list[Path],
+    ) -> bool:
+        """Require every output of a multi-file stage before it may be skipped."""
+        entry = self._entry(storage_format, symbol, stage)
+        return (
+            bool(output_paths)
+            and all(path.is_file() for path in output_paths)
+            and entry.get("status") == "success"
+            and entry.get("target_session_utc") == target_session_utc
+        )
+
     def mark_stage(
         self,
         storage_format: str,

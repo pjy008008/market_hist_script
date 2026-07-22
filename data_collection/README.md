@@ -1,66 +1,28 @@
-# API 호출 및 크롤링
+# 데이터 수집
 
-티커 목록을 크롤링하고 Alpaca에서 5분봉 또는 SIP 1분봉을 수집·갱신하는 스크립트가 있습니다.
+## 통합 파이프라인 수집기
 
-## 스크립트
+`collect_sip_long_term.py`는 Alpaca SIP 30분봉을 기간별로 조회하고 메모리에서 XNYS 정규장만 선택한 뒤 다음 결과를 만듭니다.
 
-### `get_ticker.py`
+- 최근 10년 정규장 1시간봉
+- 최근 10년 정규장 4시간봉
+- 최근 10년 정규장 일봉
+- Raw와 Adjusted 각각 생성
 
-Wikipedia의 현재 S&P 500 구성 종목과 최근 3년의 편출 이력을 결합해 티커 목록을 터미널에 출력합니다. 파일을 생성하지 않으며, 크롤링 실패 시 기본 7개 티커를 표시합니다.
+30분봉은 중간 계산에만 사용하고 저장하지 않습니다. 최초 수집은 180일 단위로 요청하며, 이후에는 마지막 결과 세션부터 증분 갱신합니다. Adjusted는 최근 10거래일을 재조회하고 수정주가 변경이 발견되면 해당 종목의 10년 전체를 다시 계산합니다.
 
-```bash
-python data_collection/get_ticker.py
-```
+이 모듈은 `daily_pipeline.py`에서 호출하며 직접 실행용 CLI는 제공하지 않습니다.
 
-### `script.py`
+## 종목 유니버스
 
-저장 형식(CSV/Parquet)과 데이터 타입(Raw/Adjusted)을 선택한 뒤 Alpaca에서 최근 3년의 5분봉을 종목별로 수집합니다. 기존 파일이 있으면 마지막 타임스탬프 다음부터 증분 갱신합니다.
+- `get_ticker.py`: Wikipedia의 현재 S&P 500과 최근 10년 편출 종목
+- `etf_universe.py`: `ticker_info/etf_universe.csv`의 검토된 ETF·ETP
 
-```bash
-python data_collection/script.py
-```
+가격 데이터와 S&P 500 편출 종목 조회 범위를 모두 최근 10년으로 사용합니다.
 
-### `collect_sip_1min.py`
+## 기존 독립 수집기
 
-기존 파일의 마지막 봉이 수집 종료 시점보다 30일 이상 오래된 종목은 Alpaca 자산 상태를 확인합니다. `inactive`가 명확히 확인되면 상장폐지 이후의 빈 7일 구간 요청을 생략하며, 확인 결과는 `pipeline_state/inactive_symbols.json`에 30일 동안 캐시합니다. 상태 조회가 실패하거나 종목이 `active`이면 기존 수집을 그대로 계속하므로 일시적인 API 오류 때문에 데이터를 건너뛰지 않습니다.
+- `collect_sip_1min.py`: 기존 최근 3년 SIP 1분봉 수집기
+- `script.py`: 기존 5분봉 수집기
 
-Alpaca SIP 피드를 명시해 현재 UTC 시각 15분 전까지의 최근 3년 1분봉을 수집합니다. Raw/Adjusted와 CSV/Parquet을 차례로 선택하며, 7일 단위로 요청하고 종목별 완료 시점에 안전하게 저장합니다. 기존 파일이 있으면 마지막 1분봉 다음부터 증분 갱신하고 3년 범위를 벗어난 과거 행은 제거합니다.
-
-통합 실행인 `daily_pipeline.py`는 Adjusted와 Raw를 모두 수집합니다. Adjusted 데이터는 최근 10거래일을 매일 다시 조회하고, 저장된 가격이 바뀌면 수정주가 이력 변경으로 판단하여 해당 종목의 3년 원본을 재수집한 뒤 후속 정규장·다중 주기 봉 결과도 다시 계산합니다. Raw 데이터는 마지막 저장 1분봉 이후부터 증분 수집합니다. 독립 실행인 `collect_sip_1min.py`는 선택한 한 데이터 타입만 수집합니다.
-
-```bash
-python data_collection/collect_sip_1min.py
-```
-
-먼저 AAPL 한 종목으로 확인하려면 다음처럼 실행합니다.
-
-```bash
-python data_collection/collect_sip_1min.py --data-type raw --format parquet --symbols AAPL
-```
-
-전체 S&P 500 관련 종목과 ETF의 3년치 1분봉은 API 요청 수, 실행 시간과 저장 공간이 매우 큽니다. 작은 종목 목록으로 먼저 검증한 뒤 전체 수집을 권장합니다.
-
-### `etf_universe.py`
-
-`ticker_info/etf_universe.csv`를 검증해 통합 파이프라인에 추가할 ETF·ETP 티커를 반환합니다. 활성화되고 허용된 상품 구조 가운데 레버리지·인버스를 제외하고 수집 종료 시점 기준 3년 이상의 상장 이력이 있는 상품만 사용합니다. 시장·해외주식·채권·S&P 500 11개 섹터 대표 ETF 23개와 `GLD`, `USO`, `UUP`, `BITO` 대체자산 ETP 4개가 등록되어 있습니다. 통합 파이프라인은 이 목록을 S&P 500 관련 티커와 합친 뒤 Adjusted·Raw 수집부터 모든 후속 단계에 동일하게 전달합니다.
-
-수집한 SIP 1분봉에서 정규장 데이터만 분리하려면 다음 명령을 실행하고 SIP 데이터셋을 선택합니다.
-
-```bash
-python data_filtering/filter_regular_session.py --dataset sip
-```
-
-## 생성되는 폴더와 파일
-
-| 선택 | 생성 경로 |
-| --- | --- |
-| Raw CSV | `market_data/csv/{TICKER}_5min_historical.csv` |
-| Raw Parquet | `market_data/parquet/{TICKER}_5min_historical.parquet` |
-| Adjusted CSV | `adjust_market_data/csv/{TICKER}_5min_historical.csv` |
-| Adjusted Parquet | `adjust_market_data/parquet/{TICKER}_5min_historical.parquet` |
-| 공통 | `ticker_info/sp500_tickers_3years.txt` |
-| ETF 유니버스 | `ticker_info/etf_universe.csv` |
-| SIP Raw | `sip_market_data/raw/{csv,parquet}/{TICKER}_1min_sip_historical.*` |
-| SIP Adjusted | `sip_market_data/adjusted/{csv,parquet}/{TICKER}_1min_sip_historical.*` |
-
-Alpaca 인증정보는 프로젝트 루트의 `.env` 또는 환경변수에서 읽습니다.
+두 스크립트는 필요할 때 독립적으로 사용할 수 있도록 유지하지만 새 통합 파이프라인에는 포함되지 않습니다.

@@ -55,6 +55,7 @@ def _resample_session(
     session: pd.DataFrame,
     frequency: pd.Timedelta,
     session_open: pd.Timestamp,
+    source_bar_minutes: int = 1,
 ) -> pd.DataFrame:
     """Aggregate one symbol session into bars aligned to the exchange open."""
     rule = {
@@ -74,9 +75,12 @@ def _resample_session(
         origin=session_open,
     )
     aggregated = resampler.agg(rule)
-    source_minutes = resampler["close"].count()
-    aggregated = aggregated.loc[source_minutes > 0].copy()
-    aggregated["source_minutes"] = source_minutes.loc[aggregated.index].astype("int64")
+    source_bar_count = resampler["close"].count()
+    aggregated = aggregated.loc[source_bar_count > 0].copy()
+    aggregated["source_minutes"] = (
+        source_bar_count.loc[aggregated.index].astype("int64")
+        * source_bar_minutes
+    )
 
     if "vwap" in session.columns:
         valid_vwap = session["vwap"].notna() & session["volume"].notna()
@@ -128,10 +132,13 @@ def resample_sip_bars(
     dataframe: pd.DataFrame,
     bar_interval: str,
     calendar_name: str = DEFAULT_CALENDAR,
+    source_bar_minutes: int = 1,
 ) -> pd.DataFrame:
     """Aggregate filtered SIP one-minute bars into the selected interval."""
     if bar_interval not in BAR_INTERVALS:
         raise ValueError(f"지원하지 않는 봉 간격입니다: {bar_interval}")
+    if source_bar_minutes <= 0:
+        raise ValueError("source_bar_minutes는 양수여야 합니다.")
     normalized = normalize_timestamp_index(dataframe)
     missing_columns = REQUIRED_COLUMNS.difference(normalized.columns)
     if missing_columns:
@@ -170,6 +177,7 @@ def resample_sip_bars(
                 session,
                 BAR_INTERVALS[bar_interval],
                 session_open,
+                source_bar_minutes,
             )
             if not aggregated.empty:
                 aggregated["symbol"] = symbol
